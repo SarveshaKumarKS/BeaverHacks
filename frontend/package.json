@@ -24,6 +24,7 @@
     "zustand": "5.0.2"
   },
   "devDependencies": {
+    "@netlify/plugin-nextjs": "^5.0.0",
     "@types/node": "22.10.2",
     "@types/qrcode": "1.5.5",
     "@types/react": "^19.2.8",
