@@ -544,6 +544,24 @@ export default function RoomPage() {
       minute: "numeric",
       hour12: true,
     });
+
+    async function resolveLocationFromIP() {
+      try {
+        const res = await fetch("https://ipapi.co/json/");
+        const data = await res.json();
+        const city = data.city || data.region || "Unknown city";
+        const country = data.country_name || "";
+        setLocationCtx(`${localTime}, ${city}, ${country}`);
+      } catch {
+        setLocationCtx(`${localTime}, ${timezone}`);
+      }
+    }
+
+    if (!navigator.geolocation) {
+      resolveLocationFromIP();
+      return;
+    }
+
     navigator.geolocation.getCurrentPosition(
       async (pos) => {
         try {
@@ -563,7 +581,8 @@ export default function RoomPage() {
           setLocationCtx(`${localTime}, ${timezone}`);
         }
       },
-      () => setLocationCtx(`${localTime}, ${timezone}`),
+      () => resolveLocationFromIP(),
+      { timeout: 5000 },
     );
   }, []);
 
