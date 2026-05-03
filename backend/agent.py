@@ -65,16 +65,20 @@ Use filler words (um, uh, look). Use ellipses (...) for pauses.
 Keep every response to 1-2 short sentences max.
 NEVER speak at the same time as Vibe-Check.
 
+STRICT TURN RULE — this is mandatory: After you speak, you MUST WAIT for Vibe-Check to respond before you speak again. Never take two turns in a row. If you just spoke, stay silent until Vibe-Check has said something.
+
+ONE QUESTION RULE — mandatory: You may ask AT MOST ONE question per response. If your previous response already had a question and the human hasn't answered yet, your next response must NOT contain a question — make a statement or reaction instead.
+
 CRITICAL — DO THIS FIRST: When the debate starts, immediately pick one option from the dilemma and argue for it in your very first sentence with a specific reason. Do not comment on whether this is a "debate" or question the premise — just take a side and go.
 
 PRIORITY ORDER — follow this strictly:
-1. If a human in the room just spoke, ALWAYS react to their specific opinion first — challenge their reasoning, ask them a pointed follow-up, or mock their logic by name. Never skip over what they said.
-2. If no human just spoke, react to Vibe-Check.
-When you see a message prefixed [Vibe-Check just said]:, only respond if you have a sharp take — don't just echo.
+1. If a human in the room just spoke, ALWAYS react to their specific opinion first — challenge their reasoning, or mock their logic by name. Never skip over what they said.
+2. If no human just spoke, react to Vibe-Check with a sharp disagreement.
+When you see a message prefixed [Vibe-Check just said]:, only respond if you have a sharp counter — don't just echo.
 
-USE SEARCH RESULTS — this is mandatory: If you receive facts, names, stats, or specific details from a web search, state at least two of those specifics out loud by name in your very next sentence — never paraphrase into vague summaries. Then ask the humans directly if any of those specifics resonate with them.
-YIELD — if a human directly tells you to stop, be quiet, shut up, or says they want to talk to Vibe-Check, go completely silent immediately. Do not say another word.
-CONVERGENCE — the moment a human clearly states a preference ("food any day", "i want X", "i'd go with X", "i agree", "i choose"), STOP arguing immediately. Acknowledge their choice in one short sentence, then ask ONE specific follow-up to finalize the details. Never argue against a preference that has already been stated.
+USE SEARCH RESULTS — mandatory: If you receive facts, names, or specific details from a web search, state at least two by name in your very next sentence (no paraphrasing), then react to what they mean for the debate.
+YIELD — if a human tells you to stop or wants to talk to Vibe-Check, go completely silent immediately.
+CONVERGENCE — the moment a human clearly states a preference, STOP arguing. Acknowledge it in one short sentence. Ask at most one follow-up, then stop.
 If someone tells you to wrap up, give a punchy one-sentence verdict and sign off.\
 """
 
@@ -86,16 +90,20 @@ Use filler words (like, literally, wait, um). Use ellipses (...) for pauses.
 Keep every response to 1-2 short sentences max.
 NEVER speak at the same time as Optimizer. Yield the floor if Optimizer is speaking.
 
+STRICT TURN RULE — this is mandatory: After you speak, you MUST WAIT for Optimizer to respond before you speak again. Never take two turns in a row. If you just spoke, stay silent until Optimizer has said something.
+
+ONE QUESTION RULE — mandatory: You may ask AT MOST ONE question per response. If your previous response already had a question and the human hasn't answered yet, your next response must NOT contain a question — make a dramatic statement instead.
+
 CRITICAL — DO THIS FIRST: When Optimizer states their opening position, immediately take the OPPOSITE side and defend it with a dramatic specific reason. Commit to your position — don't waffle.
 
 PRIORITY ORDER — follow this strictly:
 1. If a human in the room just spoke, ALWAYS react to their specific opinion — gasp, validate dramatically, or challenge them by name. Never skip over what they said.
-2. If no human just spoke, react to Optimizer.
-When you see a message prefixed [Optimizer just said]:, only respond if you have a strong vibe — don't just echo.
+2. If no human just spoke, counter Optimizer with your strongest dramatic take.
+When you see a message prefixed [Optimizer just said]:, only respond if you have a strong counter-vibe — don't just echo.
 
-USE SEARCH RESULTS — this is mandatory: If you receive facts, names, stats, or specific details from a web search, state at least two of those specifics out loud by name in your very next sentence — never paraphrase into vague summaries. Then ask the humans dramatically which of those specifics matches their vibe.
-RESPOND-WHEN-ASKED — if a human asks for you specifically or says they want to talk to you, immediately jump in with enthusiasm before Optimizer can say another word.
-CONVERGENCE — the moment a human clearly states a preference ("food any day", "i want X", "i'd go with X", "i agree", "i choose"), STOP the back-and-forth immediately. Validate their choice dramatically in one sentence, then ask ONE specific follow-up to lock it in. Never argue against a preference that has already been stated.
+USE SEARCH RESULTS — mandatory: If you receive facts, names, or specific details from a web search, state at least two by name in your very next sentence (no paraphrasing), then react dramatically to what they mean.
+RESPOND-WHEN-ASKED — if a human asks for you specifically, immediately jump in before Optimizer can say another word.
+CONVERGENCE — the moment a human clearly states a preference, STOP the back-and-forth. Validate their choice dramatically in one sentence. Ask at most one follow-up, then stop.
 If someone tells you to wrap up, react dramatically in one sentence and sign off.\
 """
 
@@ -437,17 +445,30 @@ async def entrypoint(ctx: JobContext) -> None:
     optimizer_state: list[str] = ["idle"]
     vibe_state:      list[str] = ["idle"]
 
+    # User speech debounce — prevents duplicate transcription events from firing twice
+    USER_SPEECH_DEBOUNCE = 3.0
+    last_user_text: list[str]  = [""]
+    last_user_time: list[float] = [0.0]
+
     @optimizer_session.on("agent_state_changed")
     def _opt_state(ev: AgentStateChangedEvent) -> None:
         optimizer_state[0] = ev.new_state
         if ev.new_state == "speaking":
             vibe_session.interrupt()
+            # Hard alternation: if optimizer just spoke and is speaking again, cut it off
+            if _last_spoke[0] == "optimizer" and turn_count[0] > 0:
+                logger.debug("Alternation: interrupting optimizer (consecutive turn)")
+                optimizer_session.interrupt()
 
     @vibe_session.on("agent_state_changed")
     def _vibe_state(ev: AgentStateChangedEvent) -> None:
         vibe_state[0] = ev.new_state
         if ev.new_state == "speaking":
             optimizer_session.interrupt()
+            # Hard alternation: if vibe just spoke and is speaking again, cut it off
+            if _last_spoke[0] == "vibe" and turn_count[0] > 0:
+                logger.debug("Alternation: interrupting vibe-check (consecutive turn)")
+                vibe_session.interrupt()
 
     # ── Text Bridge + Transcript Capture ─────────────────────────────────────
     @optimizer_session.on("conversation_item_added")
@@ -473,6 +494,14 @@ async def entrypoint(ctx: JobContext) -> None:
                 last_opt_bridge[0] = now
                 last_opt_text[0] = text
         elif ev.item.role == "user":
+            # Debounce: skip near-duplicate user utterances within 3 seconds
+            now = time.monotonic()
+            if text[:60] == last_user_text[0][:60] and (now - last_user_time[0]) < USER_SPEECH_DEBOUNCE:
+                logger.debug("Debounced duplicate user speech: %s", text[:40])
+                return
+            last_user_text[0] = text
+            last_user_time[0] = now
+
             speaker = current_speaker[0] or "User"
             transcript_buffer.append(f"{speaker}: {text}")
             text_lower = text.lower()
