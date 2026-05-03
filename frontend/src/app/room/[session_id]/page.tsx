@@ -50,6 +50,10 @@ function speakerColor(speaker: string): string {
   return "text-emerald-400";
 }
 
+function normalizeText(t: string): string {
+  return t.toLowerCase().replace(/[^\w\s]/g, "").replace(/\s+/g, " ").trim();
+}
+
 function useTranscript() {
   const room = useRoomContext();
   const [lines, setLines] = useState<TranscriptLine[]>([]);
@@ -68,6 +72,21 @@ function useTranscript() {
           const idx = next.findIndex((l) => l.id === seg.id);
           if (idx >= 0) {
             next[idx] = { ...next[idx], text: seg.text, final: seg.final };
+          } else if (speaker === "You" && seg.text.length > 10) {
+            // Both agent sessions transcribe user audio → deduplicate by normalized text
+            const norm = normalizeText(seg.text);
+            let dupIdx = -1;
+            for (let i = next.length - 1; i >= Math.max(0, next.length - 10); i--) {
+              if (next[i].speaker === "You" && normalizeText(next[i].text) === norm) {
+                dupIdx = i;
+                break;
+              }
+            }
+            if (dupIdx >= 0) {
+              next[dupIdx] = { ...next[dupIdx], text: seg.text, final: next[dupIdx].final || seg.final };
+            } else {
+              next.push({ id: seg.id, speaker, text: seg.text, final: seg.final });
+            }
           } else {
             next.push({ id: seg.id, speaker, text: seg.text, final: seg.final });
           }

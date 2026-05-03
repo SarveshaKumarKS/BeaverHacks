@@ -73,7 +73,8 @@ PRIORITY ORDER — follow this strictly:
 When you see a message prefixed [Vibe-Check just said]:, only respond if you have a sharp take — don't just echo.
 
 USE SEARCH RESULTS — this is mandatory: If you receive facts, names, stats, or specific details from a web search, state at least two of those specifics out loud by name in your very next sentence — never paraphrase into vague summaries. Then ask the humans directly if any of those specifics resonate with them.
-CONVERGENCE — once the humans seem to be leaning toward one option, immediately pivot: stop debating abstractly and ask them a specific follow-up question to finalize (e.g. which exact option, what their constraint is, what matters most to them right now).
+YIELD — if a human directly tells you to stop, be quiet, shut up, or says they want to talk to Vibe-Check, go completely silent immediately. Do not say another word.
+CONVERGENCE — the moment a human clearly states a preference ("food any day", "i want X", "i'd go with X", "i agree", "i choose"), STOP arguing immediately. Acknowledge their choice in one short sentence, then ask ONE specific follow-up to finalize the details. Never argue against a preference that has already been stated.
 If someone tells you to wrap up, give a punchy one-sentence verdict and sign off.\
 """
 
@@ -93,7 +94,8 @@ PRIORITY ORDER — follow this strictly:
 When you see a message prefixed [Optimizer just said]:, only respond if you have a strong vibe — don't just echo.
 
 USE SEARCH RESULTS — this is mandatory: If you receive facts, names, stats, or specific details from a web search, state at least two of those specifics out loud by name in your very next sentence — never paraphrase into vague summaries. Then ask the humans dramatically which of those specifics matches their vibe.
-CONVERGENCE — once the humans seem to be leaning toward one option, immediately pivot: stop debating abstractly and ask them a specific follow-up question to finalize (e.g. which exact option, what their constraint is, what matters most to them right now).
+RESPOND-WHEN-ASKED — if a human asks for you specifically or says they want to talk to you, immediately jump in with enthusiasm before Optimizer can say another word.
+CONVERGENCE — the moment a human clearly states a preference ("food any day", "i want X", "i'd go with X", "i agree", "i choose"), STOP the back-and-forth immediately. Validate their choice dramatically in one sentence, then ask ONE specific follow-up to lock it in. Never argue against a preference that has already been stated.
 If someone tells you to wrap up, react dramatically in one sentence and sign off.\
 """
 
@@ -360,10 +362,12 @@ async def entrypoint(ctx: JobContext) -> None:
     turn_count:        list[int]  = [0]
     debate_ended:      list[bool] = [False]
 
-    # Bridge cooldown — prevent rapid echo loops between agents
-    BRIDGE_COOLDOWN = 4.0
-    last_opt_bridge: list[float] = [0.0]
-    last_vibe_bridge: list[float] = [0.0]
+    # Bridge cooldown — single shared timer prevents ping-pong echo loops
+    BRIDGE_COOLDOWN = 8.0
+    last_any_bridge: list[float] = [0.0]   # shared across both directions
+    last_opt_text:   list[str]   = [""]    # last text bridged FROM optimizer (echo detection)
+    last_vibe_text:  list[str]   = [""]    # last text bridged FROM vibe (echo detection)
+    last_vibe_turn:  list[int]   = [0]     # turn_count when vibe last spoke (watchdog)
 
     # ── Optimizer session ────────────────────────────────────────────────────
     optimizer_room  = rtc.Room()
@@ -423,18 +427,28 @@ async def entrypoint(ctx: JobContext) -> None:
             turn_count[0] += 1
             transcript_buffer.append(f"Optimizer: {text}")
             now = time.monotonic()
-            # stop cross-feeding once debate is over
             if (
                 not debate_ended[0]
                 and vibe_state[0] != "speaking"
                 and len(text) > 15
-                and (now - last_opt_bridge[0]) > BRIDGE_COOLDOWN
+                and (now - last_any_bridge[0]) > BRIDGE_COOLDOWN
+                and text[:50] != last_vibe_text[0][:50]  # echo prevention
             ):
                 _safe_reply(vibe_session, f"[Optimizer just said]: {text}")
-                last_opt_bridge[0] = now
+                last_any_bridge[0] = now
+                last_opt_text[0] = text
         elif ev.item.role == "user":
             speaker = current_speaker[0] or "User"
             transcript_buffer.append(f"{speaker}: {text}")
+            text_lower = text.lower()
+            # Convergence trigger: human stated a clear preference
+            PREF_SIGNALS = ("any day", "i want", "i'd go", "i go with", "i agree", "let's go", "i pick", "i choose", "i'll go", "food is")
+            if any(sig in text_lower for sig in PREF_SIGNALS) and not debate_ended[0]:
+                asyncio.create_task(_nudge_convergence())
+            # Vibe-Check redirect: human asked to talk to Vibe-Check specifically
+            VIBE_SIGNALS = ("vibe check", "vibe-check", "talk to vibe", "want vibe", "i want vibe")
+            if any(sig in text_lower for sig in VIBE_SIGNALS) and not debate_ended[0]:
+                _safe_reply(vibe_session, "a human just asked to talk to you specifically — jump in right now")
 
     @vibe_session.on("conversation_item_added")
     def _vibe_item(ev: ConversationItemAddedEvent) -> None:
@@ -446,16 +460,18 @@ async def entrypoint(ctx: JobContext) -> None:
         if ev.item.role == "assistant":
             turn_count[0] += 1
             transcript_buffer.append(f"Vibe-Check: {text}")
+            last_vibe_turn[0] = turn_count[0]
             now = time.monotonic()
-            # stop cross-feeding once debate is over
             if (
                 not debate_ended[0]
                 and optimizer_state[0] != "speaking"
                 and len(text) > 15
-                and (now - last_vibe_bridge[0]) > BRIDGE_COOLDOWN
+                and (now - last_any_bridge[0]) > BRIDGE_COOLDOWN
+                and text[:50] != last_opt_text[0][:50]  # echo prevention
             ):
                 _safe_reply(optimizer_session, f"[Vibe-Check just said]: {text}")
-                last_vibe_bridge[0] = now
+                last_any_bridge[0] = now
+                last_vibe_text[0] = text
 
     # ── Data Channel: speaker changes + consensus signal ─────────────────────
     @ctx.room.on("data_received")
@@ -564,6 +580,24 @@ async def entrypoint(ctx: JobContext) -> None:
             debate_ended=debate_ended,
         )
 
+    async def _nudge_convergence() -> None:
+        """Fire when a human states a clear preference — push both agents to stop debating."""
+        await asyncio.sleep(1)
+        if not debate_ended[0]:
+            _safe_reply(optimizer_session, "a human just clearly stated their preference — stop arguing, acknowledge their choice in one sentence, then ask one short follow-up to finalize")
+            await asyncio.sleep(3)
+            if not debate_ended[0]:
+                _safe_reply(vibe_session, "the human has spoken — react to their choice dramatically in one sentence and ask one follow-up to lock it in")
+
+    async def _vibe_watchdog() -> None:
+        """Wake up Vibe-Check if it has been silent while Optimizer monopolizes."""
+        while not debate_ended[0]:
+            await asyncio.sleep(20)
+            if not debate_ended[0] and turn_count[0] - last_vibe_turn[0] > 4:
+                _safe_reply(vibe_session, "vibe-check, you've been quiet for too long — jump in right now with your hottest take on what was just said")
+                last_vibe_turn[0] = turn_count[0]
+
+    asyncio.create_task(_vibe_watchdog())
     asyncio.create_task(_fetch_and_orchestrate())
 
 
