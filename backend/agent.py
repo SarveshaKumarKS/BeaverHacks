@@ -418,8 +418,10 @@ async def entrypoint(ctx: JobContext) -> None:
             turn_count[0] += 1
             transcript_buffer.append(f"Optimizer: {text}")
             now = time.monotonic()
+            # stop cross-feeding once debate is over
             if (
-                vibe_state[0] != "speaking"
+                not debate_ended[0]
+                and vibe_state[0] != "speaking"
                 and len(text) > 15
                 and (now - last_opt_bridge[0]) > BRIDGE_COOLDOWN
             ):
@@ -440,8 +442,10 @@ async def entrypoint(ctx: JobContext) -> None:
             turn_count[0] += 1
             transcript_buffer.append(f"Vibe-Check: {text}")
             now = time.monotonic()
+            # stop cross-feeding once debate is over
             if (
-                optimizer_state[0] != "speaking"
+                not debate_ended[0]
+                and optimizer_state[0] != "speaking"
                 and len(text) > 15
                 and (now - last_vibe_bridge[0]) > BRIDGE_COOLDOWN
             ):
@@ -473,13 +477,20 @@ async def entrypoint(ctx: JobContext) -> None:
                 optimizer_session,
                 "the group just agreed — deliver your final one-sentence verdict in the funniest, most dramatic way possible and sign off",
             )
-            # delay vibe's cue so optimizer finishes speaking before vibe reacts
+            # delay vibe's cue so optimizer finishes speaking before vibe reacts,
+            # then interrupt both sessions so they go fully silent
             async def _vibe_signoff() -> None:
                 await asyncio.sleep(6)
                 _safe_reply(
                     vibe_session,
                     "react to the optimizer's verdict with maximum drama in one sentence, then sign off in the most extra way possible",
                 )
+                await asyncio.sleep(10)
+                try:
+                    optimizer_session.interrupt()
+                    vibe_session.interrupt()
+                except Exception:
+                    pass
             asyncio.create_task(_vibe_signoff())
 
     # ── Start both sessions ──────────────────────────────────────────────────
