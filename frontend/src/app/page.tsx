@@ -145,11 +145,11 @@ export default function HostLobby() {
   // ── Lobby view ──────────────────────────────────────────────────────────────
   if (inLobby) {
     return (
-      <main className="mx-auto flex min-h-screen max-w-lg flex-col items-center justify-center gap-8 px-6 py-10">
-        <div className="text-center">
-          <p className="text-xs uppercase tracking-[0.26em] text-white/40">The Decider</p>
-          <h2 className="mt-2 text-2xl font-bold text-white">Arena ready</h2>
-          <p className="mt-2 text-white/50">
+      <main className="mx-auto flex min-h-screen max-w-lg flex-col items-center justify-center gap-10 px-6 py-10">
+        <div className="w-full">
+          <p className="font-mono text-xs uppercase tracking-widest text-white/30">The Decider</p>
+          <h2 className="mt-3 text-3xl font-bold text-foreground">Arena ready.</h2>
+          <p className="mt-2 text-sm text-white/40">
             Share the QR code so others can join, then enter when ready.
           </p>
         </div>
@@ -158,29 +158,29 @@ export default function HostLobby() {
           <Image
             src={qr}
             alt="Room QR code"
-            width={320}
-            height={320}
+            width={280}
+            height={280}
             unoptimized
-            className="rounded-2xl"
+            className="border border-white/10"
           />
         )}
 
         <button
           type="button"
           onClick={copyLink}
-          className="flex items-center gap-2 text-sm text-white/50 transition hover:text-white/80"
+          className="flex items-center gap-2 font-mono text-xs uppercase tracking-widest text-white/30 transition hover:text-amber"
         >
-          <Link2 size={14} />
+          <Link2 size={12} />
           {copied ? "Copied!" : shareUrl}
         </button>
 
         <button
           type="button"
           onClick={() => router.push(`/room/${roomName}`)}
-          className="flex w-full items-center justify-center gap-2 rounded-md bg-amber-400 px-6 py-4 text-lg font-semibold text-black transition hover:bg-amber-300"
+          className="flex w-full items-center justify-center gap-2 rounded-full bg-amber px-6 py-4 text-base font-semibold text-black transition hover:bg-amber/90"
         >
           Enter Room
-          <ArrowRight size={20} />
+          <ArrowRight size={18} />
         </button>
       </main>
     );
@@ -188,67 +188,67 @@ export default function HostLobby() {
 
   // ── Landing / form view ─────────────────────────────────────────────────────
   return (
-    <main className="mx-auto flex min-h-screen max-w-5xl flex-col justify-center px-6 py-10">
-      <section className="grid gap-8 md:grid-cols-[1.1fr_0.9fr] md:items-center">
+    <main className="mx-auto flex min-h-screen max-w-4xl flex-col justify-center px-6 py-12">
+      <section className="grid gap-12 md:grid-cols-[1fr_1fr] md:items-start md:pt-16">
         <div>
-          <p className="text-sm uppercase tracking-[0.26em] text-amber">The Consensus Duo</p>
-          <h1 className="mt-3 text-5xl font-bold leading-tight text-white md:text-7xl">
-            The Decider
+          <p className="font-mono text-xs uppercase tracking-widest text-amber">The Consensus Duo</p>
+          <h1 className="mt-4 text-6xl font-bold leading-none text-foreground md:text-8xl">
+            The<br />Decider
           </h1>
-          <p className="mt-5 max-w-xl text-lg leading-8 text-white/65">
-            Two AI podcast hosts argue your dilemma in real-time voice. Native audio,
+          <p className="mt-6 max-w-sm text-sm leading-7 text-white/45">
+            Two AI voices argue your dilemma in real-time. Native audio,
             zero latency — just speak and let them fight it out.
           </p>
         </div>
 
-        <form onSubmit={submit} className="rounded-lg border border-white/10 bg-panel p-5 shadow-2xl">
-          <label className="block text-sm font-medium text-white/70" htmlFor="dilemma">
+        <form onSubmit={submit} className="border border-white/10 p-6">
+          <label className="block font-mono text-xs uppercase tracking-widest text-white/30" htmlFor="dilemma">
             What&apos;s the dilemma?
           </label>
           <textarea
             id="dilemma"
             value={dilemma}
             onChange={(e) => setDilemma(e.target.value)}
-            placeholder="What should our team build, eat, ship, buy, or avoid?"
-            rows={5}
-            className="mt-2 w-full resize-none rounded-md border border-white/10 bg-white/5 px-4 py-3 outline-none transition focus:border-amber"
+            placeholder="Type your dilemma…"
+            rows={4}
+            className="mt-4 w-full resize-none border-0 bg-transparent text-4xl font-bold leading-snug text-foreground outline-none placeholder:text-white/15 focus:outline-none md:text-5xl"
           />
-          {/* Participant names */}
-          <div className="mt-4">
-            <label className="block text-sm font-medium text-white/70">
-              Who&apos;s joining? <span className="text-white/30">(optional)</span>
+
+          <div className="mt-6 border-t border-white/10 pt-5">
+            <label className="block font-mono text-xs uppercase tracking-widest text-white/30">
+              Who&apos;s joining? <span className="text-white/15">(optional)</span>
             </label>
-            <p className="mt-1 text-xs text-white/40">
-              Add names for everyone sharing the mic — agents will address them by name.
+            <p className="mt-1 font-mono text-xs text-white/20">
+              Agents will address participants by name.
             </p>
-            <div className="mt-2 flex gap-2">
+            <div className="mt-3 flex gap-2">
               <input
                 type="text"
                 value={nameInput}
                 onChange={(e) => setNameInput(e.target.value)}
                 onKeyDown={(e) => e.key === "Enter" && (e.preventDefault(), addParticipant())}
                 placeholder="e.g. Alice"
-                className="flex-1 rounded-md border border-white/10 bg-white/5 px-3 py-2 text-sm outline-none transition focus:border-amber"
+                className="flex-1 border border-white/10 bg-transparent px-3 py-2 text-sm text-foreground outline-none transition placeholder:text-white/20 focus:border-amber"
               />
               <button
                 type="button"
                 onClick={addParticipant}
-                className="flex items-center gap-1 rounded-md border border-white/10 px-3 py-2 text-sm text-white/60 transition hover:border-amber hover:text-white"
+                className="flex items-center gap-1 rounded-full border border-white/15 px-4 py-2 font-mono text-xs uppercase tracking-widest text-white/40 transition hover:border-amber hover:text-amber"
               >
-                <Plus size={14} />
+                <Plus size={12} />
                 Add
               </button>
             </div>
             {participants.length > 0 && (
-              <div className="mt-2 flex flex-wrap gap-2">
+              <div className="mt-3 flex flex-wrap gap-2">
                 {participants.map((name) => (
                   <span
                     key={name}
-                    className="flex items-center gap-1 rounded-full bg-amber/20 px-3 py-1 text-xs font-semibold text-amber"
+                    className="flex items-center gap-1 rounded-full border border-amber/30 px-3 py-1 font-mono text-xs uppercase tracking-widest text-amber"
                   >
                     {name}
-                    <button type="button" onClick={() => removeParticipant(name)}>
-                      <X size={11} />
+                    <button type="button" onClick={() => removeParticipant(name)} className="ml-1">
+                      <X size={10} />
                     </button>
                   </span>
                 ))}
@@ -257,19 +257,20 @@ export default function HostLobby() {
           </div>
 
           {locationCtx && (
-            <p className="mt-3 text-xs text-white/30">
-              Location detected: {locationCtx.split(",").slice(1).join(",").trim() || locationCtx}
+            <p className="mt-4 font-mono text-xs uppercase tracking-widest text-white/20">
+              {locationCtx.split(",").slice(1).join(",").trim() || locationCtx}
             </p>
           )}
 
-          {error && <p className="mt-3 text-sm text-red-300">{error}</p>}
+          {error && <p className="mt-3 text-xs text-red-400">{error}</p>}
+
           <button
             type="submit"
             disabled={!canSubmit || loading}
-            className="mt-5 flex w-full items-center justify-center gap-2 rounded-md bg-amber px-4 py-3 font-semibold text-black transition hover:bg-amber/90 disabled:cursor-not-allowed disabled:opacity-50"
+            className="mt-6 flex w-full items-center justify-center gap-2 rounded-full bg-amber px-5 py-3 font-semibold text-black transition hover:bg-amber/90 disabled:cursor-not-allowed disabled:opacity-40"
           >
-            {loading ? "Spinning up the arena…" : "Start the Debate"}
-            <ArrowRight size={18} />
+            {loading ? "Spinning up…" : "Start the Debate"}
+            <ArrowRight size={16} />
           </button>
         </form>
       </section>

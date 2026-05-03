@@ -5,21 +5,20 @@ const config: Config = {
   theme: {
     extend: {
       colors: {
-        background: "#0d1117",
-        foreground: "#f6f7fb",
-        panel: "#151b23",
-        optimizer: "#38bdf8",
+        background: "#050505",
+        foreground: "#ededed",
+        panel: "#0e0e0e",
+        optimizer: "#f6c453",
         vibe: "#f472b6",
-        amber: "#f6c453"
+        amber: "#f6c453",
       },
       boxShadow: {
-        optimizer: "0 0 28px rgba(56,189,248,0.45)",
-        vibe: "0 0 28px rgba(244,114,182,0.45)"
-      }
-    }
+        optimizer: "0 0 32px rgba(246,196,83,0.55)",
+        vibe: "0 0 32px rgba(244,114,182,0.55)",
+      },
+    },
   },
-  plugins: []
+  plugins: [],
 };
 
 export default config;
-

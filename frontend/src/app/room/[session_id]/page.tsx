@@ -13,7 +13,7 @@ import {
 } from "@livekit/components-react";
 import type { Participant, TranscriptionSegment } from "livekit-client";
 import QRCode from "qrcode";
-import { ArrowRight, CheckCircle, Copy, LogOut, Mic, MicOff, QrCode, Radio, Users } from "lucide-react";
+import { ArrowRight, CheckCircle, Copy, LogOut, Mic, MicOff, QrCode, Users } from "lucide-react";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -94,15 +94,15 @@ function TranscriptPanel() {
   if (lines.length === 0) return null;
 
   return (
-    <div className="w-full max-w-lg rounded-xl border border-white/10 bg-white/5 p-4">
-      <p className="mb-2 text-xs uppercase tracking-widest text-white/30">Transcript</p>
+    <div className="w-full max-w-lg border border-white/10 p-4">
+      <p className="mb-3 font-mono text-xs uppercase tracking-widest text-white/25">Transcript</p>
       <div className="flex max-h-52 flex-col gap-2 overflow-y-auto pr-1">
         {lines.map((line) => (
-          <div key={line.id} className={`text-sm ${line.final ? "opacity-100" : "opacity-50"}`}>
-            <span className={`mr-2 font-semibold ${speakerColor(line.speaker)}`}>
-              {line.speaker}:
+          <div key={line.id} className={`text-sm leading-snug ${line.final ? "opacity-100" : "opacity-40"}`}>
+            <span className={`mr-2 font-mono text-xs uppercase tracking-widest ${speakerColor(line.speaker)}`}>
+              {line.speaker}
             </span>
-            <span className="text-white/80">{line.text}</span>
+            <span className="text-white/70">{line.text}</span>
           </div>
         ))}
         <div ref={bottomRef} />
@@ -143,20 +143,20 @@ function SpeakerSelector({ participants }: { participants: string[] }) {
 
   return (
     <div className="flex w-full max-w-lg flex-col items-center gap-3">
-      <p className="text-xs uppercase tracking-widest text-white/30">Tap your name to speak</p>
+      <p className="font-mono text-xs uppercase tracking-widest text-white/25">Tap your name to speak</p>
       <div className="flex flex-wrap justify-center gap-2">
         {participants.map((name) => (
           <button
             key={name}
             type="button"
             onClick={() => selectSpeaker(name)}
-            className={`flex items-center gap-2 rounded-full px-4 py-2 text-sm font-semibold transition ${
+            className={`flex items-center gap-2 rounded-full px-4 py-2 font-mono text-xs uppercase tracking-widest transition ${
               active === name
-                ? "bg-amber-400 text-black shadow-lg"
-                : "bg-white/10 text-white/70 hover:bg-white/20"
+                ? "bg-amber text-black"
+                : "border border-white/15 text-white/50 hover:border-amber/50 hover:text-white/80"
             }`}
           >
-            {active === name && <Mic size={13} />}
+            {active === name && <Mic size={11} />}
             {name}
           </button>
         ))}
@@ -208,36 +208,38 @@ function RoomContent({ dilemma, participants, onLeave }: { dilemma: string; part
   return (
     <div className="flex flex-col items-center gap-8 px-4 py-10">
       {dilemma && (
-        <p className="max-w-xl text-center text-lg font-medium text-white/80">
-          &ldquo;{dilemma}&rdquo;
+        <p className="max-w-xl text-center text-2xl font-bold leading-snug text-foreground">
+          {dilemma}
         </p>
       )}
 
-      {/* Agent avatar cards */}
-      <div className="grid w-full max-w-lg grid-cols-2 gap-4">
+      {/* Agent presence — no card boxes */}
+      <div className="flex w-full max-w-md justify-around">
         <AgentCard
           name="The Optimizer"
           emoji="🧠"
-          accentClass="ring-amber-400 bg-amber-400/10"
+          color="amber"
           isActive={speakerLabel === "The Optimizer"}
         />
         <AgentCard
           name="The Vibe-Check"
           emoji="✨"
-          accentClass="ring-fuchsia-400 bg-fuchsia-400/10"
+          color="vibe"
           isActive={speakerLabel === "The Vibe-Check"}
         />
       </div>
 
       {/* Live audio bar visualizer */}
-      <div className="flex w-full max-w-lg flex-col items-center gap-3">
+      <div className="flex w-full max-w-lg flex-col items-center gap-2">
         <BarVisualizer
           state={state}
           barCount={24}
           trackRef={audioTrack}
-          style={{ width: "100%", height: 64 }}
+          style={{ width: "100%", height: 56 }}
         />
-        <p className="text-sm text-white/50">{statusLabel[state] ?? state}</p>
+        <p className="font-mono text-xs uppercase tracking-widest text-white/30">
+          {statusLabel[state] ?? state}
+        </p>
       </div>
 
       {/* Speaker selector — tap before speaking */}
@@ -252,13 +254,13 @@ function RoomContent({ dilemma, participants, onLeave }: { dilemma: string; part
           type="button"
           onClick={sendConsensus}
           disabled={consensusSent}
-          className={`flex items-center gap-2 rounded-full px-6 py-3 text-sm font-semibold transition ${
+          className={`flex items-center gap-2 rounded-full px-6 py-3 font-mono text-xs uppercase tracking-widest transition ${
             consensusSent
-              ? "bg-emerald-500/10 text-emerald-400/50 cursor-default"
-              : "bg-emerald-500/20 text-emerald-400 hover:bg-emerald-500/30"
+              ? "border border-white/10 text-white/25 cursor-default"
+              : "border border-white/20 text-white/60 hover:border-amber hover:text-amber"
           }`}
         >
-          <CheckCircle size={16} />
+          <CheckCircle size={13} />
           {consensusSent ? "Wrapping up…" : "We've decided!"}
         </button>
         <ParticipantControls onLeave={onLeave} showMic={participants.length === 0} />
@@ -284,22 +286,22 @@ function ParticipantControls({ onLeave, showMic }: { onLeave: () => void; showMi
         <button
           type="button"
           onClick={() => localParticipant.setMicrophoneEnabled(!isMicrophoneEnabled)}
-          className={`flex items-center gap-2 rounded-full px-5 py-3 text-sm font-semibold transition ${
+          className={`flex items-center gap-2 rounded-full px-5 py-2 font-mono text-xs uppercase tracking-widest transition ${
             isMicrophoneEnabled
-              ? "bg-white/10 text-white hover:bg-white/20"
-              : "bg-red-500/20 text-red-400 hover:bg-red-500/30"
+              ? "border border-white/15 text-white/50 hover:border-white/30"
+              : "border border-red-500/40 text-red-400/70 hover:border-red-400"
           }`}
         >
-          {isMicrophoneEnabled ? <Mic size={16} /> : <MicOff size={16} />}
+          {isMicrophoneEnabled ? <Mic size={12} /> : <MicOff size={12} />}
           {isMicrophoneEnabled ? "Mute" : "Unmute"}
         </button>
       )}
       <button
         type="button"
         onClick={onLeave}
-        className="flex items-center gap-2 rounded-full bg-red-500/20 px-5 py-3 text-sm font-semibold text-red-400 transition hover:bg-red-500/30"
+        className="flex items-center gap-2 rounded-full border border-red-500/30 px-5 py-2 font-mono text-xs uppercase tracking-widest text-red-400/60 transition hover:border-red-400 hover:text-red-400"
       >
-        <LogOut size={16} />
+        <LogOut size={12} />
         Leave
       </button>
     </div>
@@ -322,14 +324,14 @@ function QRButton({ url }: { url: string }) {
       <button
         type="button"
         onClick={() => setOpen((o) => !o)}
-        className="flex items-center gap-2 rounded-md border border-white/10 px-3 py-2 text-sm text-white/75 transition hover:border-fuchsia-400"
+        className="flex items-center gap-2 rounded-full border border-white/15 px-3 py-2 font-mono text-xs uppercase tracking-widest text-white/40 transition hover:border-amber hover:text-amber"
       >
-        <QrCode size={16} />
+        <QrCode size={12} />
         Invite
       </button>
       {open && dataUrl && (
-        <div className="absolute right-0 top-full z-50 mt-2 rounded-xl border border-white/10 bg-[#0d1117] p-4 shadow-xl">
-          <p className="mb-2 text-center text-xs text-white/50">Scan to join</p>
+        <div className="absolute right-0 top-full z-50 mt-2 border border-white/10 bg-[#050505] p-4 shadow-2xl">
+          <p className="mb-2 text-center font-mono text-xs uppercase tracking-widest text-white/30">Scan to join</p>
           <img src={dataUrl} alt="QR code" width={160} height={160} />
         </div>
       )}
@@ -340,26 +342,34 @@ function QRButton({ url }: { url: string }) {
 function AgentCard({
   name,
   emoji,
-  accentClass,
+  color,
   isActive,
 }: {
   name: string;
   emoji: string;
-  accentClass: string;
+  color: "amber" | "vibe";
   isActive: boolean;
 }) {
+  const dotColor = color === "amber" ? "bg-amber" : "bg-vibe";
+  const glowShadow =
+    color === "amber"
+      ? "0 0 24px rgba(246,196,83,0.7)"
+      : "0 0 24px rgba(244,114,182,0.7)";
+
   return (
-    <div
-      className={`flex flex-col items-center gap-2 rounded-xl border border-white/10 p-4 transition-all duration-300 ${isActive ? `ring-2 shadow-lg ${accentClass}` : "bg-white/5"}`}
-    >
-      <span className="text-4xl">{emoji}</span>
-      <span className="text-center text-sm font-semibold text-white/80">{name}</span>
-      {isActive && (
-        <span className="flex items-center gap-1 text-xs text-white/50">
-          <Radio size={10} className="animate-pulse" />
-          speaking
-        </span>
-      )}
+    <div className="flex flex-col items-center gap-3">
+      <span
+        className="text-5xl transition-all duration-300"
+        style={isActive ? { filter: `drop-shadow(${glowShadow})` } : undefined}
+      >
+        {emoji}
+      </span>
+      <div className="flex items-center gap-2">
+        <span
+          className={`h-2 w-2 rounded-full transition-all duration-300 ${dotColor} ${isActive ? "animate-pulse opacity-100" : "opacity-20"}`}
+        />
+        <span className="font-mono text-xs uppercase tracking-widest text-white/40">{name}</span>
+      </div>
     </div>
   );
 }
@@ -392,29 +402,29 @@ function WaitingRoom({ roomName, dilemma, participants, locationCtx }: { roomNam
   }
 
   return (
-    <div className="flex flex-col items-center gap-8 px-4 py-16">
+    <div className="flex flex-col items-center gap-10 px-4 py-16">
       {dilemma && (
-        <p className="max-w-xl text-center text-lg font-medium text-white/80">
-          &ldquo;{dilemma}&rdquo;
+        <p className="max-w-xl text-center text-2xl font-bold leading-snug text-foreground">
+          {dilemma}
         </p>
       )}
 
-      <div className="w-full max-w-sm rounded-xl border border-white/10 bg-white/5 p-6">
-        <div className="mb-4 flex items-center gap-2 text-sm font-semibold uppercase tracking-widest text-white/40">
-          <Users size={14} />
-          Participants ({humans.length})
+      <div className="w-full max-w-sm border border-white/10 p-5">
+        <div className="mb-4 flex items-center gap-2 font-mono text-xs uppercase tracking-widest text-white/30">
+          <Users size={12} />
+          In the room ({humans.length})
         </div>
         <ul className="flex flex-col gap-2">
           {humans.map((p) => {
             const isLocal = p.identity === room.localParticipant.identity;
             const label = p.identity.startsWith("host-")
-              ? `Host${isLocal ? " (You)" : ""}`
+              ? `Host${isLocal ? " (you)" : ""}`
               : isLocal
-                ? `${p.identity} (You)`
+                ? `${p.identity} (you)`
                 : p.identity;
             return (
-              <li key={p.identity} className="flex items-center gap-2 text-sm text-white/70">
-                <span className="h-2 w-2 rounded-full bg-emerald-400" />
+              <li key={p.identity} className="flex items-center gap-2 font-mono text-xs uppercase tracking-widest text-white/50">
+                <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
                 {label}
               </li>
             );
@@ -427,13 +437,15 @@ function WaitingRoom({ roomName, dilemma, participants, locationCtx }: { roomNam
           type="button"
           onClick={startDebate}
           disabled={starting || !locationCtx}
-          className="flex items-center gap-2 rounded-md bg-amber-400 px-8 py-4 text-lg font-semibold text-black transition hover:bg-amber-300 disabled:opacity-50"
+          className="flex items-center gap-2 rounded-full bg-amber px-8 py-4 font-semibold text-black transition hover:bg-amber/90 disabled:opacity-40"
         >
           {starting ? "Starting…" : !locationCtx ? "Getting location…" : "Start Debate"}
-          <ArrowRight size={20} />
+          <ArrowRight size={18} />
         </button>
       ) : (
-        <p className="animate-pulse text-sm text-white/40">Waiting for host to start the debate…</p>
+        <p className="animate-pulse font-mono text-xs uppercase tracking-widest text-white/25">
+          Waiting for host…
+        </p>
       )}
 
       <RoomAudioRenderer />
@@ -601,7 +613,7 @@ export default function RoomPage() {
   if (error) {
     return (
       <main className="flex min-h-screen items-center justify-center">
-        <p className="text-red-300">{error}</p>
+        <p className="font-mono text-xs uppercase tracking-widest text-red-400/70">{error}</p>
       </main>
     );
   }
@@ -609,7 +621,9 @@ export default function RoomPage() {
   if (!connectionDetails) {
     return (
       <main className="flex min-h-screen items-center justify-center">
-        <p className="animate-pulse text-white/50">Connecting to arena…</p>
+        <p className="animate-pulse font-mono text-xs uppercase tracking-widest text-white/25">
+          Connecting to arena…
+        </p>
       </main>
     );
   }
@@ -618,16 +632,18 @@ export default function RoomPage() {
     <main className="min-h-screen">
       <header className="flex flex-wrap items-center justify-between gap-3 border-b border-white/10 px-5 py-4">
         <div>
-          <p className="text-xs uppercase tracking-[0.24em] text-amber">The Decider — Live Arena</p>
-          <h1 className="text-xl font-semibold text-white/90">{dilemma || roomName}</h1>
+          <p className="font-mono text-xs uppercase tracking-widest text-amber/70">The Decider — Live</p>
+          <h1 className="mt-1 max-w-lg text-lg font-bold text-foreground leading-snug">
+            {dilemma || roomName}
+          </h1>
         </div>
         <div className="flex items-center gap-2">
           <button
             type="button"
             onClick={onCopy}
-            className="flex items-center gap-2 rounded-md border border-white/10 px-3 py-2 text-sm text-white/75 transition hover:border-amber-400"
+            className="flex items-center gap-2 rounded-full border border-white/15 px-3 py-2 font-mono text-xs uppercase tracking-widest text-white/40 transition hover:border-amber hover:text-amber"
           >
-            <Copy size={16} />
+            <Copy size={12} />
             {copied ? "Copied" : "Share"}
           </button>
           <QRButton url={shareUrl} />
