@@ -10,7 +10,6 @@ import {
   useVoiceAssistant,
   useRoomContext,
 } from "@livekit/components-react";
-import "@livekit/components-styles";
 import type { Participant, TranscriptionSegment } from "livekit-client";
 import QRCode from "qrcode";
 import { Copy, QrCode, Radio } from "lucide-react";
@@ -58,8 +57,9 @@ function useTranscript() {
     const localIdentity = room.localParticipant.identity;
     const onTranscription = (
       segments: TranscriptionSegment[],
-      participant: Participant,
+      participant?: Participant,
     ) => {
+      if (!participant) return;
       const speaker = speakerName(participant, localIdentity);
       setLines((prev) => {
         const next = [...prev];
