@@ -126,6 +126,7 @@ class LLMClients:
     def __init__(self, settings: Settings):
         self.settings = settings
         genai.configure(api_key=settings.gemini_api_key)
+        self.optimizer_model = genai.GenerativeModel(settings.gemini_model)
         self.vibe_model = genai.GenerativeModel(settings.gemini_model)
         self.nvidia = AsyncOpenAI(
             api_key=settings.nvidia_api_key,
@@ -201,27 +202,32 @@ class LLMClients:
             system += WRAP_UP_SUFFIX
         elif reaction_only:
             system += REACTION_ONLY_SUFFIX
-
-        messages: list[dict] = [{"role": "system", "content": system}]
         if force and not wrap_up:
-            messages.append({"role": "system", "content": FORCED_DECISION_PROMPT})
-        messages.append({"role": "user", "content": render_session_context(session, force=force)})
+            system += f"\n\n{FORCED_DECISION_PROMPT}"
 
         max_tokens = 70 if wrap_up else (80 if reaction_only else 150)
+        context_header = render_session_context(session, force=force)
+        history = _build_gemini_history(session.transcript, "Optimizer")
+        turn_prompt = f"{context_header}\nYour turn as The Optimizer."
 
-        stream = await self.nvidia.chat.completions.create(
-            model=self.settings.nvidia_nemotron_model,
-            messages=messages,
-            temperature=0.8,
-            max_tokens=max_tokens,
-            stream=True,
-        )
-        async for event in stream:
-            if not event.choices:
-                continue
-            chunk = event.choices[0].delta.content or ""
-            if chunk:
-                yield chunk
+        def _collect() -> list[str]:
+            model = genai.GenerativeModel(
+                self.settings.gemini_model,
+                system_instruction=system,
+            )
+            chat = model.start_chat(history=history)
+            resp = chat.send_message(
+                turn_prompt,
+                generation_config={"temperature": 0.8, "max_output_tokens": max_tokens},
+                stream=True,
+            )
+            return [getattr(c, "text", "") or "" for c in resp]
+
+        chunks = await asyncio.to_thread(_collect)
+        for text in chunks:
+            if text:
+                yield text
+                await asyncio.sleep(0)
 
     # ------------------------------------------------------------------
     # Vibe-Check (Gemini)
@@ -244,11 +250,18 @@ class LLMClients:
             system += f"\n\n{FORCED_DECISION_PROMPT}"
 
         max_tokens = 70 if wrap_up else (80 if reaction_only else 150)
-        full_prompt = f"{system}\n\n{render_session_context(session, force=force)}"
+        context_header = render_session_context(session, force=force)
+        history = _build_gemini_history(session.transcript, "Vibe-Check")
+        turn_prompt = f"{context_header}\nYour turn as Vibe-Check."
 
         def _collect() -> list[str]:
-            resp = self.vibe_model.generate_content(
-                full_prompt,
+            model = genai.GenerativeModel(
+                self.settings.gemini_model,
+                system_instruction=system,
+            )
+            chat = model.start_chat(history=history)
+            resp = chat.send_message(
+                turn_prompt,
                 generation_config={"temperature": 0.85, "max_output_tokens": max_tokens},
                 stream=True,
             )
@@ -327,17 +340,66 @@ Use exact field names. Be concise. No markdown."""
 
 
 def render_session_context(session: ActiveSession, force: bool = False) -> str:
-    transcript = "\n".join(f"{m.speaker}: {m.text}" for m in session.transcript)
+    """System context header only — no transcript. Transcript is passed as native message history."""
     constraints = "\n".join(f"- {k}: {v}" for k, v in session.known_constraints.items())
-    force_line = "\nYou must force a final decision this turn." if force else ""
+    force_line = "\nYou MUST declare a final decision this turn: [CONSENSUS_REACHED]: <decision>." if force else ""
     return f"""Dilemma: {session.dilemma}
 Turn: {session.current_turn}/{session.max_turns}
 Known constraints:
-{constraints}
+{constraints}{force_line}"""
 
-Transcript:
-{transcript or "(No transcript yet.)"}
-{force_line}"""
+
+# ---------------------------------------------------------------------------
+# Transcript → native message array helpers
+# ---------------------------------------------------------------------------
+
+def _build_openai_history(
+    transcript: list,
+    own_speaker: str,
+) -> list[dict[str, str]]:
+    """Map transcript to OpenAI chat message format.
+
+    own_speaker turns  → role: assistant  (the model being called)
+    all other speakers → role: user, prefixed [Speaker]
+    """
+    history: list[dict[str, str]] = []
+    for msg in transcript:
+        if msg.speaker == own_speaker:
+            history.append({"role": "assistant", "content": msg.text})
+        else:
+            history.append({"role": "user", "content": f"[{msg.speaker}] {msg.text}"})
+    return history
+
+
+def _build_gemini_history(
+    transcript: list,
+    own_speaker: str,
+) -> list[dict]:
+    """Map transcript to Gemini contents format with strict user/model alternation.
+
+    own_speaker turns  → role: model
+    all other speakers → role: user, prefixed [Speaker]
+
+    Consecutive same-role entries are merged into a single block to satisfy
+    Gemini's strict alternation requirement.
+    """
+    history: list[dict] = []
+    for msg in transcript:
+        if msg.speaker == own_speaker:
+            role, content = "model", msg.text
+        else:
+            role, content = "user", f"[{msg.speaker}] {msg.text}"
+
+        if history and history[-1]["role"] == role:
+            history[-1]["parts"][0]["text"] += f"\n{content}"
+        else:
+            history.append({"role": role, "parts": [{"text": content}]})
+
+    # Gemini requires history to start with a user turn
+    if history and history[0]["role"] == "model":
+        history.insert(0, {"role": "user", "parts": [{"text": "(conversation start)"}]})
+
+    return history
 
 
 # ---------------------------------------------------------------------------
