@@ -125,19 +125,37 @@ def _opt_state(ev):
 ```
 When one agent starts speaking, it immediately calls `interrupt()` on the other. State is tracked in `optimizer_state` / `vibe_state` single-element lists (mutable container trick for closure capture).
 
-**Text bridge + cooldown:**
+**Text bridge + shared cooldown:**
 ```python
+BRIDGE_COOLDOWN = 8.0
+last_any_bridge: list[float] = [0.0]   # shared across BOTH directions
+last_opt_text:   list[str]   = [""]    # last text bridged FROM optimizer (echo detection)
+last_vibe_text:  list[str]   = [""]    # last text bridged FROM vibe (echo detection)
+
 @optimizer_session.on("conversation_item_added")
 def _opt_item(ev):
-    if debate_ended[0]:
-        return  # stop cross-feeding after wrap-up
-    now = time.monotonic()
-    if vibe_state[0] != "speaking" and len(text) > 15 and (now - last_opt_bridge[0]) > BRIDGE_COOLDOWN:
-        _safe_reply(vibe_session, f"[Optimizer just said]: {text}")
-        last_opt_bridge[0] = now
+    if ev.item.role == "assistant":
+        now = time.monotonic()
+        if (
+            not debate_ended[0]
+            and vibe_state[0] != "speaking"
+            and len(text) > 15
+            and (now - last_any_bridge[0]) > BRIDGE_COOLDOWN
+            and text[:50] != last_vibe_text[0][:50]   # echo prevention
+        ):
+            _safe_reply(vibe_session, f"[Optimizer just said]: {text}")
+            last_any_bridge[0] = now
+            last_opt_text[0] = text
+    elif ev.item.role == "user":
+        # convergence + vibe-redirect detection (see below)
 # (mirror for vibe_session)
 ```
-Agents never hear each other's audio. Instead, the transcript of each turn is injected into the other agent's context as a user message. `BRIDGE_COOLDOWN = 4.0` seconds prevents rapid back-and-forth echo loops. A 15-character minimum filters trivial turns. **The bridge is gated on `debate_ended[0]`** — once the wrap-up button is pressed, agents stop receiving each other's messages and go quiet naturally.
+
+**Why shared cooldown (critical):** With separate per-agent cooldowns (old: 4s each), both could fire within the same 4s window — Optimizer bridges to Vibe, Vibe responds, Vibe bridges back, creating a ping-pong echo loop where both agents repeated the same question endlessly. `last_any_bridge` ensures a minimum 8s gap between any bridge fire in any direction.
+
+**Echo detection:** If an agent echoes or lightly rephrases what it was just given as a bridge message, the first 50 characters of the new text match `last_other_text`. The bridge is skipped to break the loop.
+
+Agents never hear each other's audio. A 15-character minimum filters trivial turns. **The bridge is gated on `debate_ended[0]`** — once the wrap-up button is pressed, agents stop receiving each other's messages and go quiet naturally.
 
 **`_safe_reply` helper (module level):**
 ```python
@@ -149,15 +167,33 @@ def _safe_reply(session: AgentSession, text: str) -> None:
 ```
 All `generate_reply` calls go through this. Swallows exceptions during Gemini reconnects. **Must stay at module level** — defining it inside a closure causes `NameError` (was a prior bug).
 
+**Convergence signals from user speech:**
+When user speech is captured in `conversation_item_added` (role == "user"), two checks fire:
+1. **Preference detection** — if text contains any of `("any day", "i want", "i'd go", "i go with", "i agree", "let's go", "i pick", "i choose", "i'll go", "food is")`, `asyncio.create_task(_nudge_convergence())` fires 1s later. `_nudge_convergence` sends a direct prompt to Optimizer to stop arguing and ask one finalizing follow-up, then 3s later prompts Vibe-Check to validate the choice dramatically.
+2. **Vibe-Check redirect** — if text contains `("vibe check", "vibe-check", "talk to vibe", "want vibe")`, Vibe-Check is directly prompted to jump in immediately.
+
+**Vibe-Check watchdog (`_vibe_watchdog`):**
+```python
+async def _vibe_watchdog() -> None:
+    while not debate_ended[0]:
+        await asyncio.sleep(20)
+        if not debate_ended[0] and turn_count[0] - last_vibe_turn[0] > 4:
+            _safe_reply(vibe_session, "vibe-check, you've been quiet for too long — jump in right now...")
+            last_vibe_turn[0] = turn_count[0]
+```
+Prevents Optimizer from monopolizing when the text bridge causes a rapid Optimizer→Vibe→Optimizer cascade that keeps interrupting Vibe-Check before it can speak. `last_vibe_turn` is updated in `_vibe_item` each time Vibe-Check completes a turn.
+
 **Debate seeding:**
 After a 2-second sleep (letting sessions connect), the Optimizer is seeded with the dilemma, location context, and participant names. The seed prompt tells the Optimizer to welcome participants by name, reference time/place, then **immediately pick one side of the dilemma and argue for it in one sharp sentence**. Vibe-Check reacts via the text bridge and must take the opposite side.
 
 **System prompts — structure:**
-Both agents have three key sections:
+Both agents have these key sections:
 1. **CRITICAL (opening)**: Take a position immediately on the first turn — no meta-commentary about the debate.
 2. **PRIORITY ORDER**: React to humans first (by name), co-host second.
 3. **USE SEARCH RESULTS**: When given specific facts, names, stats, or details from a web search, state at least two specifics out loud by name — never paraphrase. Then ask the humans if any of it changes their thinking. This is intentionally generic (not "place names") so it works for food, tech, career, travel, or any dilemma type.
-4. **CONVERGENCE**: Once humans lean toward one option, stop abstract debate and ask a specific follow-up question to finalize the decision.
+4. **YIELD** (Optimizer only): If a human directly tells Optimizer to stop, be quiet, or says they want to talk to Vibe-Check, Optimizer must go completely silent immediately.
+5. **RESPOND-WHEN-ASKED** (Vibe-Check only): If a human asks for Vibe-Check specifically, it jumps in immediately with enthusiasm.
+6. **CONVERGENCE**: The moment a human clearly states a preference (`"food any day"`, `"i want X"`, `"i'd go with X"`, `"i agree"`), stop arguing immediately. Acknowledge the choice in one sentence, then ask ONE specific follow-up to finalize. Never argue against a stated preference.
 
 Response length: 1-2 short sentences max.
 
@@ -249,13 +285,40 @@ import "@livekit/components-styles/index.css";
 Imports `@livekit/components-styles/index.css` and `globals.css`. Has `suppressHydrationWarning` on `<html>` to silence Dark Reader browser extension noise.
 
 ### `src/app/globals.css`
-Standard Tailwind directives + dark background gradient. No LiveKit import here (moved to layout.tsx).
+Tailwind directives + Editorial Ledger styles:
+- Background: `#050505` solid + SVG fractal noise texture (subtle grain overlay)
+- `::selection` styled amber (`#f6c453` bg, `#050505` text)
+- No gradient — replaced with noise texture only
+
+### `tailwind.config.ts` — Design tokens
+
+```ts
+colors: {
+  background: "#050505",   // near-black
+  foreground: "#ededed",   // off-white
+  panel:      "#0e0e0e",   // slightly lighter surface (barely used)
+  optimizer:  "#f6c453",   // amber — Optimizer accent
+  vibe:       "#f472b6",   // fuchsia — Vibe-Check accent
+  amber:      "#f6c453",   // alias
+}
+boxShadow: {
+  optimizer: "0 0 32px rgba(246,196,83,0.55)",
+  vibe:      "0 0 32px rgba(244,114,182,0.55)"
+}
+```
+
+### Design system ("Editorial Ledger")
+- All action buttons: `rounded-full` only — no rounded panels anywhere
+- Panels/borders: flat `border border-white/10` or `border-white/15`, no background fill, no border-radius
+- All labels, metadata, status text: `font-mono uppercase tracking-widest`
+- `AgentCard`: no card box — just an emoji with `drop-shadow` glow filter when speaking + a small `rounded-full` colored pulse dot (amber for Optimizer, fuchsia for Vibe-Check)
+- Landing textarea: `text-4xl`/`text-5xl`, borderless, transparent background, placeholder-only border guidance
 
 ### `src/app/page.tsx` — Landing + Lobby
 
 **Two views, one page component (`HostLobby`):**
-1. **Form view** (default): textarea for the dilemma + optional participant name inputs + "Start the Debate" button.
-2. **Lobby view** (after submit): QR code (320×320, dark-themed), copyable share URL, and "Enter Room" button.
+1. **Form view** (default): giant borderless textarea for the dilemma + optional participant name inputs + `rounded-full` "Start the Debate" button.
+2. **Lobby view** (after submit): QR code (280×280, dark-themed), monospace copyable share URL, and `rounded-full` "Enter Room" button.
 
 **Location resolution starts immediately on page load** via `useEffect`. By the time the user fills in the dilemma and clicks "Start the Debate", location is already resolved. Stored in `sessionStorage` as `lk-location-${roomName}` when the room is created. A small location hint (city, country) is shown below the form so the user can confirm it's correct.
 
@@ -314,8 +377,9 @@ Users tap a name button → sends `{ type: "speaker", name: "Alice" }`. Backend 
 
 **`TranscriptPanel` + `useTranscript` hook:**
 - `room.on("transcriptionReceived", ...)` — fired by LiveKit for agent TTS and human STT
-- Merges non-final (streaming) segments by segment `id`; dims to 50% opacity until `final: true`
+- Merges non-final (streaming) segments by segment `id`; dims to 40% opacity until `final: true`
 - Auto-scrolls to bottom
+- **Two-level deduplication for "You" segments**: because both agent sessions (`optimizer_room` and `vibe_room`) each run their own STT pipeline on the shared user audio track, the same utterance arrives twice with *different* segment IDs. A `normalizeText` helper (lowercase, strip punctuation, collapse whitespace) does a secondary lookup against the last 10 "You" entries before inserting a new line — finds the match and updates it in place instead of adding a duplicate.
 
 **`QRButton` — "Invite" button:**
 - Generates 200px dark-themed QR on mount, toggles popover on click
@@ -371,6 +435,12 @@ LIVEKIT_API_SECRET=<secret>
 | Agents never named specific places/facts from search | Fixed: search results auto-injected immediately after fetch; raw Tavily data passed directly (not summarized). |
 | Search injection prompts were food-specific ("place names") | Fixed: prompts now say "specific names, facts, or details" — generic for any dilemma type. |
 | Full dilemma string used in search queries | Fixed: truncated to 80 chars to avoid garbage search queries. |
+| Optimizer won't stop when human says "shut up" or asks for Vibe-Check | Fixed: YIELD rule added to Optimizer prompt. Data channel user speech handler also detects "vibe check" / "talk to vibe" and directly pings Vibe-Check to jump in. |
+| Vibe-Check goes silent while Optimizer monopolizes | Fixed: `_vibe_watchdog` task — every 20s, if Vibe-Check hasn't spoken in 4+ agent turns, sends a direct wake-up prompt. `last_vibe_turn` tracks the turn count of Vibe-Check's last turn. |
+| Both agents echo/repeat the same question in a loop | Fixed: bridge cooldown changed from 4s per-agent to **8s shared** across both directions (`last_any_bridge`). Also added echo detection — skips bridging if first 50 chars of new text match the last text received from that direction. |
+| Agents keep arguing after human states a clear preference | Fixed: CONVERGENCE rule strengthened with explicit phrase examples. `_nudge_convergence()` async task fires within 1s of preference keywords in user speech, directly prompting both agents to finalize. |
+| "You" lines appear twice in transcript | Fixed: both agent sessions independently transcribe user audio → different segment IDs for same utterance. Added normalized-text dedup in `useTranscript` — checks last 10 "You" entries before inserting a new one. |
+| UI was dark blue gradient | Replaced with Editorial Ledger design: `#050505` + SVG noise, monospace labels, flat borders, `rounded-full` buttons only, `AgentCard` as emoji + glow dot (no card box). |
 
 ---
 
