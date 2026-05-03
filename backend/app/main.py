@@ -3,6 +3,7 @@ from __future__ import annotations
 import socketio
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response
 
 from .config import load_settings
 from .llm import LLMClients
@@ -23,7 +24,8 @@ sio = socketio.AsyncServer(
     async_mode="asgi",
     cors_allowed_origins=[settings.frontend_origin, "http://localhost:3000", "http://127.0.0.1:3000"],
 )
-manager = SessionManager(LLMClients(settings))
+llm = LLMClients(settings)
+manager = SessionManager(llm)
 
 
 async def emit(event: str, payload: dict, room: str | None = None) -> None:
@@ -41,6 +43,26 @@ async def get_session(session_id: str) -> dict:
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
     return session.model_dump(mode="json")
+
+
+@fastapi_app.get("/tts/available")
+async def tts_available() -> dict[str, bool]:
+    return {"available": settings.openai_api_key is not None}
+
+
+@fastapi_app.post("/tts")
+async def tts_endpoint(agent: str = "Optimizer", text: str = "") -> Response:
+    """Convert text to speech using OpenAI TTS. Requires OPENAI_API_KEY."""
+    if not settings.openai_api_key:
+        raise HTTPException(status_code=404, detail="TTS not configured (set OPENAI_API_KEY)")
+    if not text.strip():
+        raise HTTPException(status_code=400, detail="text is required")
+
+    audio_bytes = await llm.text_to_speech(agent, text.strip())  # type: ignore[arg-type]
+    if audio_bytes is None:
+        raise HTTPException(status_code=500, detail="TTS generation failed")
+
+    return Response(content=audio_bytes, media_type="audio/mpeg")
 
 
 @sio.event
@@ -84,4 +106,3 @@ async def user_interjection(sid: str, payload: dict) -> dict:
 
 
 socket_app = socketio.ASGIApp(sio, other_asgi_app=fastapi_app)
-

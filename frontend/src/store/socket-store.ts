@@ -6,6 +6,13 @@ import { API_URL } from "@/lib/utils";
 
 export type AgentName = "Optimizer" | "Vibe-Check";
 
+export type SessionStatus =
+  | "speaking"
+  | "user_interrupting"
+  | "awaiting_user_answer"
+  | "resuming_with_new_context"
+  | "consensus_reached";
+
 export type TranscriptMessage = {
   speaker: string;
   text: string;
@@ -20,10 +27,14 @@ export type ActiveSession = {
   max_turns: number;
   transcript: TranscriptMessage[];
   social_debt_modifier: string;
-  status: "active" | "paused_for_interrogation" | "consensus_reached";
+  status: SessionStatus;
   debt_balance: number;
   winner?: AgentName | null;
   final_decision?: string | null;
+  // Podcast state machine
+  pending_question: boolean;
+  pending_question_asker?: AgentName | null;
+  last_speaker?: AgentName | null;
 };
 
 type ConsensusPayload = {
@@ -61,30 +72,46 @@ export const useSocketStore = create<SocketState>((set, get) => ({
 
     const socket = io(API_URL, {
       transports: ["websocket"],
-      autoConnect: true
+      autoConnect: true,
     });
 
     socket.on("connect_error", (err) => set({ error: err.message }));
+
     socket.on("room_state_update", (session: ActiveSession) => {
-      set({ session, streaming: {}, error: null });
+      set((state) => {
+        const turnChanged = state.session?.current_turn !== session.current_turn;
+        const debateEnded = session.status === "consensus_reached";
+        return {
+          session,
+          streaming: turnChanged || debateEnded ? {} : state.streaming,
+          error: null,
+        };
+      });
     });
+
     socket.on("agent_typing", ({ speaker }: { speaker: AgentName }) => {
-      set({ activeSpeaker: speaker });
+      set({ activeSpeaker: speaker, streaming: {} });
     });
+
     socket.on("message_chunk", ({ speaker, chunk }: { speaker: string; chunk: string }) => {
       set((state) => ({
         streaming: {
           ...state.streaming,
-          [speaker]: `${state.streaming[speaker] ?? ""}${chunk}`
+          [speaker]: `${state.streaming[speaker] ?? ""}${chunk}`,
         },
-        activeSpeaker: speaker === "Optimizer" || speaker === "Vibe-Check" ? speaker : state.activeSpeaker
+        activeSpeaker:
+          speaker === "Optimizer" || speaker === "Vibe-Check"
+            ? (speaker as AgentName)
+            : state.activeSpeaker,
       }));
     });
+
     socket.on("interrogation_triggered", ({ missing_fields }: { missing_fields: string[] }) => {
-      set({ missingFields: missing_fields });
+      set({ missingFields: missing_fields, streaming: {}, activeSpeaker: null });
     });
+
     socket.on("consensus_reached", (payload: ConsensusPayload) => {
-      set({ consensus: payload, missingFields: [], activeSpeaker: null });
+      set({ consensus: payload, missingFields: [], activeSpeaker: null, streaming: {} });
     });
 
     set({ socket });
@@ -94,25 +121,32 @@ export const useSocketStore = create<SocketState>((set, get) => ({
   createRoom: (groupId, initialDilemma) =>
     new Promise((resolve, reject) => {
       const socket = get().connect();
-      socket.emit("create_room", { group_id: groupId, initial_dilemma: initialDilemma }, (response: { session_id?: string; error?: string }) => {
-        if (response?.session_id) resolve(response.session_id);
-        else reject(new Error(response?.error ?? "Unable to create room"));
-      });
+      socket.emit(
+        "create_room",
+        { group_id: groupId, initial_dilemma: initialDilemma },
+        (response: { session_id?: string; error?: string }) => {
+          if (response?.session_id) resolve(response.session_id);
+          else reject(new Error(response?.error ?? "Unable to create room"));
+        }
+      );
     }),
 
   joinRoom: (sessionId, userName) =>
     new Promise((resolve, reject) => {
       const socket = get().connect();
-      socket.emit("join_room", { session_id: sessionId, user_name: userName }, (response: { ok: boolean; error?: string }) => {
-        if (response?.ok) resolve();
-        else reject(new Error(response?.error ?? "Unable to join room"));
-      });
+      socket.emit(
+        "join_room",
+        { session_id: sessionId, user_name: userName },
+        (response: { ok: boolean; error?: string }) => {
+          if (response?.ok) resolve();
+          else reject(new Error(response?.error ?? "Unable to join room"));
+        }
+      );
     }),
 
   interject: (sessionId, text) => {
     const socket = get().connect();
     socket.emit("user_interjection", { session_id: sessionId, text });
     set({ missingFields: [], consensus: null });
-  }
+  },
 }));
-

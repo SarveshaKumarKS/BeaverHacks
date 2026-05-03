@@ -24,6 +24,8 @@ Fill in:
 - `GEMINI_MODEL`
 - `NVIDIA_NEMOTRON_MODEL`
 
+The current NVIDIA default is `nvidia/nemotron-3-super-120b-a12b`.
+
 Then run:
 
 ```bash

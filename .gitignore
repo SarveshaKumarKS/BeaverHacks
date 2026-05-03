@@ -8,6 +8,8 @@ node_modules/
 dist/
 build/
 .env
+.env.local
+.env.*.local
 backend/data/social_debt.json
 backend/data/active_sessions.json
 

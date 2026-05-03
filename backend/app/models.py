@@ -7,12 +7,27 @@ from pydantic import BaseModel, Field
 
 
 AgentName = Literal["Optimizer", "Vibe-Check"]
-SessionStatus = Literal["active", "paused_for_interrogation", "consensus_reached"]
+SessionStatus = Literal[
+    "speaking",
+    "user_interrupting",
+    "awaiting_user_answer",
+    "resuming_with_new_context",
+    "consensus_reached",
+]
 
 
 class TranscriptMessage(BaseModel):
     speaker: str
     text: str
+
+
+class OrchestratorDecision(BaseModel):
+    """JSON decision emitted by the silent Orchestrator after each turn."""
+    next_speaker: Literal["optimizer", "vibe_check", "user"]
+    status: "SessionStatus"
+    updated_constraints: dict[str, str | None] = Field(default_factory=dict)
+    reasoning: str = ""
+    final_decision: str | None = None
 
 
 class DebtHistoryEntry(BaseModel):
@@ -42,13 +57,17 @@ class ActiveSession(BaseModel):
         }
     )
     current_turn: int = 0
-    max_turns: int = 6
+    max_turns: int = 8
     transcript: list[TranscriptMessage] = Field(default_factory=list)
     social_debt_modifier: str = "No social debt yet. Debate on merit."
-    status: SessionStatus = "active"
+    status: SessionStatus = "speaking"
     debt_balance: float = 0.0
     winner: AgentName | None = None
     final_decision: str | None = None
+    # Podcast state machine
+    pending_question: bool = False
+    pending_question_asker: AgentName | None = None
+    last_speaker: AgentName | None = None
 
 
 class CreateRoomPayload(BaseModel):
@@ -64,4 +83,3 @@ class JoinRoomPayload(BaseModel):
 class UserInterjectionPayload(BaseModel):
     session_id: str
     text: str
-

@@ -34,7 +34,7 @@ export default function RoomPage() {
       <header className="flex flex-wrap items-center justify-between gap-3 border-b border-white/10 px-5 py-4">
         <div>
           <p className="text-xs uppercase tracking-[0.24em] text-amber">Silent Disco Arena</p>
-          <h1 className="text-2xl font-semibold">{session?.dilemma ?? "Joining room..."}</h1>
+          <h1 className="text-2xl font-semibold">{session?.dilemma ?? "Joining room…"}</h1>
         </div>
         <button
           type="button"
@@ -53,10 +53,22 @@ export default function RoomPage() {
       <div className="grid gap-5 p-5 xl:grid-cols-[1fr_320px]">
         <section className="space-y-5">
           <div className="grid gap-4 md:grid-cols-2">
-            <AvatarNode agent="Optimizer" active={activeSpeaker === "Optimizer"} />
-            <AvatarNode agent="Vibe-Check" active={activeSpeaker === "Vibe-Check"} />
+            <AvatarNode
+              agent="Optimizer"
+              active={activeSpeaker === "Optimizer"}
+              sessionStatus={session?.status}
+              pendingQuestionAsker={session?.pending_question_asker}
+            />
+            <AvatarNode
+              agent="Vibe-Check"
+              active={activeSpeaker === "Vibe-Check"}
+              sessionStatus={session?.status}
+              pendingQuestionAsker={session?.pending_question_asker}
+            />
           </div>
+
           <DebtMeter balance={session?.debt_balance ?? 0} />
+
           {consensus && (
             <section className="rounded-lg border border-emerald-300/30 bg-emerald-400/10 p-4">
               <div className="flex items-center gap-2 text-emerald-200">
@@ -66,14 +78,20 @@ export default function RoomPage() {
               <p className="mt-2 text-white/80">{consensus.final_decision}</p>
             </section>
           )}
-          <LiveTranscript session={session} streaming={streaming} />
+
+          <LiveTranscript
+            session={session}
+            streaming={streaming}
+          />
         </section>
 
-        <ConstraintPanel constraints={session?.known_constraints ?? {}} missingFields={missingFields} />
+        <ConstraintPanel
+          constraints={session?.known_constraints ?? {}}
+          missingFields={missingFields}
+        />
       </div>
 
       <InterjectInput sessionId={sessionId} />
     </main>
   );
 }
-
