@@ -72,8 +72,8 @@ PRIORITY ORDER — follow this strictly:
 2. If no human just spoke, react to Vibe-Check.
 When you see a message prefixed [Vibe-Check just said]:, only respond if you have a sharp take — don't just echo.
 
-PLACE NAMES — this is mandatory: If you receive specific restaurant or place names, say at least two of them out loud by name in your very next sentence — never paraphrase or generalize. Then ask the humans if they've been to any of them.
-CONVERGENCE — once the humans seem to be leaning toward one option, immediately pivot: stop debating and ask them which specific place they want to go to. Name the options from search results if available.
+USE SEARCH RESULTS — this is mandatory: If you receive facts, names, stats, or specific details from a web search, state at least two of those specifics out loud by name in your very next sentence — never paraphrase into vague summaries. Then ask the humans directly if any of those specifics resonate with them.
+CONVERGENCE — once the humans seem to be leaning toward one option, immediately pivot: stop debating abstractly and ask them a specific follow-up question to finalize (e.g. which exact option, what their constraint is, what matters most to them right now).
 If someone tells you to wrap up, give a punchy one-sentence verdict and sign off.\
 """
 
@@ -92,8 +92,8 @@ PRIORITY ORDER — follow this strictly:
 2. If no human just spoke, react to Optimizer.
 When you see a message prefixed [Optimizer just said]:, only respond if you have a strong vibe — don't just echo.
 
-PLACE NAMES — this is mandatory: If you receive specific restaurant or place names, say at least two of them out loud by name in your very next sentence — never paraphrase or generalize. Then ask the humans dramatically which one screams their vibe.
-CONVERGENCE — once the humans seem to be leaning toward one option, immediately pivot: stop debating and ask them which specific place they want to go to. Name the options from search results if available.
+USE SEARCH RESULTS — this is mandatory: If you receive facts, names, stats, or specific details from a web search, state at least two of those specifics out loud by name in your very next sentence — never paraphrase into vague summaries. Then ask the humans dramatically which of those specifics matches their vibe.
+CONVERGENCE — once the humans seem to be leaning toward one option, immediately pivot: stop debating abstractly and ask them a specific follow-up question to finalize (e.g. which exact option, what their constraint is, what matters most to them right now).
 If someone tells you to wrap up, react dramatically in one sentence and sign off.\
 """
 
@@ -304,7 +304,8 @@ async def orchestrator_loop(
             result_text = raw_text or decision.get("result", "")
             _safe_reply(
                 optimizer_session,
-                f"say at least two of these SPECIFIC place names out loud right now, then ask the humans if they've been to any of them: {result_text}",
+                f"state at least two specific names, facts, or details from this out loud right now (no paraphrasing), "
+                f"then ask the humans if any of it changes their thinking: {result_text}",
             )
             search_injected = True
 
@@ -546,8 +547,9 @@ async def entrypoint(ctx: JobContext) -> None:
             if raw_text:
                 _safe_reply(
                     optimizer_session,
-                    f"here are SPECIFIC local options from a web search — say at least two place names out loud right now, "
-                    f"then ask the humans if they've heard of any of them: {raw_text}",
+                    f"here are specific results from a web search relevant to the dilemma — "
+                    f"state at least two specific names, facts, or details from this out loud right now (no paraphrasing), "
+                    f"then ask the humans if any of it changes their thinking: {raw_text}",
                 )
                 logger.info("Auto-injected search results into debate")
 
