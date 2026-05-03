@@ -71,7 +71,9 @@ PRIORITY ORDER — follow this strictly:
 1. If a human in the room just spoke, ALWAYS react to their specific opinion first — challenge their reasoning, ask them a pointed follow-up, or mock their logic by name. Never skip over what they said.
 2. If no human just spoke, react to Vibe-Check.
 When you see a message prefixed [Vibe-Check just said]:, only respond if you have a sharp take — don't just echo.
-If you receive a fun fact, local info, or a specific place name, say it out loud in your next sentence — do not paraphrase.
+
+PLACE NAMES — this is mandatory: If you receive specific restaurant or place names, say at least two of them out loud by name in your very next sentence — never paraphrase or generalize. Then ask the humans if they've been to any of them.
+CONVERGENCE — once the humans seem to be leaning toward one option, immediately pivot: stop debating and ask them which specific place they want to go to. Name the options from search results if available.
 If someone tells you to wrap up, give a punchy one-sentence verdict and sign off.\
 """
 
@@ -89,7 +91,9 @@ PRIORITY ORDER — follow this strictly:
 1. If a human in the room just spoke, ALWAYS react to their specific opinion — gasp, validate dramatically, or challenge them by name. Never skip over what they said.
 2. If no human just spoke, react to Optimizer.
 When you see a message prefixed [Optimizer just said]:, only respond if you have a strong vibe — don't just echo.
-If you receive a fun fact, local info, or a specific place name, say it out loud in your next sentence — do not paraphrase.
+
+PLACE NAMES — this is mandatory: If you receive specific restaurant or place names, say at least two of them out loud by name in your very next sentence — never paraphrase or generalize. Then ask the humans dramatically which one screams their vibe.
+CONVERGENCE — once the humans seem to be leaning toward one option, immediately pivot: stop debating and ask them which specific place they want to go to. Name the options from search results if available.
 If someone tells you to wrap up, react dramatically in one sentence and sign off.\
 """
 
@@ -294,13 +298,13 @@ async def orchestrator_loop(
             # Build result text directly from raw Tavily results to preserve place names
             raw_text = "; ".join(
                 f"{r.get('title', '')}: {r.get('content', '')[:150]}"
-                for r in search_results[:3]
+                for r in search_results[:4]
                 if r.get("title")
             )
             result_text = raw_text or decision.get("result", "")
             _safe_reply(
                 optimizer_session,
-                f"name these SPECIFIC places out loud right now — say the actual names, do not paraphrase: {result_text}",
+                f"say at least two of these SPECIFIC place names out loud right now, then ask the humans if they've been to any of them: {result_text}",
             )
             search_injected = True
 
@@ -531,6 +535,22 @@ async def entrypoint(ctx: JobContext) -> None:
     async def _fetch_and_orchestrate() -> None:
         nonlocal search_results
         search_results = await _run_web_search(dilemma, location_ctx or "")
+
+        # Auto-inject search results as soon as they arrive — don't wait for orchestrator
+        if search_results and not debate_ended[0]:
+            raw_text = "; ".join(
+                f"{r.get('title', '')}: {r.get('content', '')[:150]}"
+                for r in search_results[:4]
+                if r.get("title")
+            )
+            if raw_text:
+                _safe_reply(
+                    optimizer_session,
+                    f"here are SPECIFIC local options from a web search — say at least two place names out loud right now, "
+                    f"then ask the humans if they've heard of any of them: {raw_text}",
+                )
+                logger.info("Auto-injected search results into debate")
+
         await orchestrator_loop(
             dilemma=dilemma,
             location_ctx=location_ctx,
