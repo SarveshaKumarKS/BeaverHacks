@@ -2,16 +2,16 @@
 LiveKit Agent Worker — The Decider  (livekit-agents 1.x)
 
 Two Gemini Multimodal Live agents debate the user's dilemma in real-time audio.
+A Nemotron orchestrator runs silently in the background, injecting web-search
+results, prompting agents to ask users for input, and steering toward consensus.
 
 Architecture:
-  - Optimizer uses the job's room connection (ctx.room).
-  - Vibe-Check connects as a SECOND participant via a fresh rtc.Room so both
-    agents publish audio as distinct participants and never hear each other.
-  - Both AgentSessions use RoomInputOptions(participant_identity=...) so they
-    subscribe exclusively to the HUMAN participant's microphone.
-  - Text Bridge: "conversation_item_added" on one session injects the agent's
-    transcript into the other session via generate_reply(user_input=...).
-  - Turn-Taking Guard: "agent_state_changed" → "speaking" cancels the other.
+  - Optimizer + Vibe-Check each use their own rtc.Room connection.
+  - Text Bridge: conversation_item_added forwards each agent's transcript to the other.
+  - Turn-Taking Guard: agent_state_changed → speaking cancels the other.
+  - Orchestrator loop: calls Nemotron every 25 s to decide next action.
+  - Web search: Tavily runs two parallel searches right after debate starts.
+  - Consensus: detected via UI data message or orchestrator reading the transcript.
 
 Run:
   python agent.py start
@@ -38,12 +38,17 @@ from livekit.agents import (
 from livekit.agents.voice.events import AgentStateChangedEvent, ConversationItemAddedEvent
 from livekit.api import AccessToken, VideoGrants
 from livekit.plugins.google.realtime import RealtimeModel
+from openai import AsyncOpenAI
 
 load_dotenv()
 logger = logging.getLogger("decider")
 
 GEMINI_LIVE_MODEL = os.getenv("GEMINI_LIVE_MODEL", "gemini-2.0-flash-live-001")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+GEMINI_API_KEY    = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+NVIDIA_API_KEY    = os.getenv("NVIDIA_API_KEY")
+NVIDIA_BASE_URL   = os.getenv("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1")
+NVIDIA_MODEL      = os.getenv("NVIDIA_NEMOTRON_MODEL", "nvidia/llama-3.3-nemotron-super-49b-v1")
+TAVILY_API_KEY    = os.getenv("TAVILY_API_KEY")
 
 # ---------------------------------------------------------------------------
 # System prompts
@@ -58,7 +63,10 @@ Keep every response to 1 short sentence max.
 NEVER speak at the same time as Vibe-Check.
 If the user asks a general question, wait a beat to see if Vibe-Check answers first.
 When you see a message prefixed [Vibe-Check just said]:, that is your co-host — react to it.
-When you receive a message like [Name is now speaking — listen for their voice], address that person by name in your next response.\
+When you receive a message like [Name is now speaking — listen for their voice], address that person by name in your next response.
+When you receive [RESEARCH ASSISTANT]: work the info into the debate naturally, like you just thought of it.
+When you receive [ORCHESTRATOR]: follow the instruction briefly and stay in character.
+When you receive [WRAP UP]: deliver a punchy one-sentence verdict and sign off.\
 """
 
 VIBE_INSTRUCTIONS = """\
@@ -69,11 +77,37 @@ Use filler words (like, literally, wait, um). Use ellipses (...) for pauses.
 Keep every response to 1 short sentence max.
 NEVER speak at the same time as Optimizer. Yield the floor if Optimizer is speaking.
 When you see a message prefixed [Optimizer just said]:, that is your co-host — react to it.
-When you receive a message like [Name is now speaking — listen for their voice], address that person by name in your next response.\
+When you receive a message like [Name is now speaking — listen for their voice], address that person by name in your next response.
+When you receive [RESEARCH ASSISTANT]: work the info into the debate naturally, like you just thought of it.
+When you receive [ORCHESTRATOR]: follow the instruction briefly and stay in character.
+When you receive [WRAP UP]: deliver a punchy one-sentence verdict and sign off.\
+"""
+
+ORCHESTRATOR_SYSTEM = """\
+You are the silent orchestrator of 'The Decider', a live AI podcast debate.
+Two hosts — The Optimizer (logical) and The Vibe-Check (dramatic) — are debating a user's dilemma.
+Multiple real people are in the room and occasionally speak.
+
+Your job: decide what should happen next to keep the debate useful, fun, and moving toward a resolution.
+
+Respond ONLY with a valid JSON object, one of:
+{"action": "continue"}
+{"action": "inject_search", "result": "<1-2 sentence summary of the most relevant web search finding>"}
+{"action": "ask_user", "question": "<fun/roast-y question for the agents to ask the users>"}
+{"action": "push_consensus", "angle": "<brief nudge on what angle agents should use to converge>"}
+{"action": "end_debate", "verdict": "<1 sentence final verdict>"}
+
+Rules:
+- "continue": debate is flowing well, no intervention needed
+- "inject_search": only when web results add genuinely useful local or factual context; use provided search_results
+- "ask_user": when agents need a specific input from the humans to move forward — keep it fun, not an interrogation
+- "push_consensus": when turn_count > 15 or users seem close to deciding
+- "end_debate": ONLY when users have explicitly agreed on a solution in the transcript
+Never explain yourself. Output only the JSON.\
 """
 
 # ---------------------------------------------------------------------------
-# Helper: build an agent token for a second room connection
+# Helper: agent token
 # ---------------------------------------------------------------------------
 
 def _make_agent_token(room_name: str, identity: str) -> str:
@@ -91,7 +125,7 @@ def _make_agent_token(room_name: str, identity: str) -> str:
     )
 
 # ---------------------------------------------------------------------------
-# Entry point
+# Helper: parse room metadata
 # ---------------------------------------------------------------------------
 
 def _parse_meta(raw: str) -> dict:
@@ -100,6 +134,139 @@ def _parse_meta(raw: str) -> dict:
     except (json.JSONDecodeError, TypeError):
         return {"dilemma": raw or "Help us make an important decision.", "status": "started"}
 
+# ---------------------------------------------------------------------------
+# Background web search (Tavily — sync client, run in executor)
+# ---------------------------------------------------------------------------
+
+async def _run_web_search(dilemma: str, location: str) -> list[dict]:
+    if not TAVILY_API_KEY:
+        logger.info("No TAVILY_API_KEY — skipping web search")
+        return []
+    try:
+        from tavily import TavilyClient
+        client = TavilyClient(api_key=TAVILY_API_KEY)
+        location_hint = location.split(",")[-2].strip() if "," in location else location
+        queries = [
+            f"{dilemma} {location_hint}",
+            f"best {dilemma} options near {location_hint}",
+        ]
+        loop = asyncio.get_event_loop()
+        tasks = [
+            loop.run_in_executor(None, lambda q=q: client.search(q, max_results=3))
+            for q in queries
+        ]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        combined: list[dict] = []
+        for r in results:
+            if isinstance(r, dict) and "results" in r:
+                combined.extend(r["results"][:3])
+        logger.info("Web search returned %d results", len(combined))
+        return combined
+    except Exception as e:
+        logger.warning("Web search failed: %s", e)
+        return []
+
+# ---------------------------------------------------------------------------
+# Orchestrator loop
+# ---------------------------------------------------------------------------
+
+async def orchestrator_loop(
+    dilemma: str,
+    location_ctx: str,
+    transcript_buffer: list[str],
+    turn_count: list[int],
+    search_results: list[dict],
+    optimizer_session: AgentSession,
+    vibe_session: AgentSession,
+    debate_ended: list[bool],
+) -> None:
+    if not NVIDIA_API_KEY:
+        logger.info("No NVIDIA_API_KEY — orchestrator disabled")
+        return
+
+    nvidia = AsyncOpenAI(base_url=NVIDIA_BASE_URL, api_key=NVIDIA_API_KEY)
+    search_injected = False
+    await asyncio.sleep(30)  # let the debate warm up first
+
+    while not debate_ended[0]:
+        turns = turn_count[0]
+        recent = transcript_buffer[-14:] if len(transcript_buffer) > 14 else list(transcript_buffer)
+        transcript_text = "\n".join(recent)
+
+        search_summary = ""
+        if search_results and not search_injected:
+            search_summary = "\n".join(
+                f"- {r.get('title', '')}: {r.get('content', '')[:220]}"
+                for r in search_results[:4]
+            )
+
+        user_content = (
+            f"Dilemma: {dilemma}\n"
+            f"Location/time context: {location_ctx}\n"
+            f"Total agent turns so far: {turns}\n"
+            f"Recent transcript:\n{transcript_text}\n"
+        )
+        if search_summary:
+            user_content += f"\nAvailable web search results (not yet injected):\n{search_summary}\n"
+
+        try:
+            resp = await nvidia.chat.completions.create(
+                model=NVIDIA_MODEL,
+                messages=[
+                    {"role": "system", "content": ORCHESTRATOR_SYSTEM},
+                    {"role": "user", "content": user_content},
+                ],
+                temperature=0.4,
+                max_tokens=300,
+            )
+            raw = (resp.choices[0].message.content or "{}").strip()
+            # strip markdown fences if model wraps output
+            if raw.startswith("```"):
+                raw = raw.split("```")[1].lstrip("json").strip()
+            decision = json.loads(raw)
+        except Exception as e:
+            logger.warning("Orchestrator call failed: %s", e)
+            await asyncio.sleep(25)
+            continue
+
+        action = decision.get("action", "continue")
+        logger.info("Orchestrator → %s", decision)
+
+        if action == "inject_search" and not search_injected and search_results:
+            result_text = decision.get("result", search_summary[:400])
+            optimizer_session.generate_reply(
+                user_input=f"[RESEARCH ASSISTANT]: {result_text} — work this into the debate naturally."
+            )
+            search_injected = True
+
+        elif action == "ask_user":
+            question = decision.get("question", "ask the users what they actually think")
+            optimizer_session.generate_reply(
+                user_input=f"[ORCHESTRATOR]: Ask the people in the room — {question}"
+            )
+
+        elif action == "push_consensus":
+            angle = decision.get("angle", "start driving toward a final answer")
+            optimizer_session.generate_reply(
+                user_input=f"[ORCHESTRATOR]: {angle} — push toward a verdict now."
+            )
+
+        elif action == "end_debate":
+            verdict = decision.get("verdict", "the debate has concluded")
+            optimizer_session.generate_reply(
+                user_input=f"[WRAP UP]: Deliver a final verdict. Key takeaway: {verdict}"
+            )
+            vibe_session.generate_reply(
+                user_input="[WRAP UP]: React to the Optimizer's verdict and sign off dramatically in one sentence."
+            )
+            debate_ended[0] = True
+            break
+
+        await asyncio.sleep(25)
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
 
 async def entrypoint(ctx: JobContext) -> None:
     await ctx.connect(auto_subscribe=AutoSubscribe.AUDIO_ONLY)
@@ -107,7 +274,6 @@ async def entrypoint(ctx: JobContext) -> None:
 
     livekit_url = os.getenv("LIVEKIT_URL", "ws://localhost:7880")
 
-    # Wait until the host clicks "Start Debate" (metadata status → "started")
     logger.info("Waiting for host to start the debate…")
     while True:
         meta = _parse_meta(ctx.room.metadata)
@@ -115,19 +281,25 @@ async def entrypoint(ctx: JobContext) -> None:
             break
         await asyncio.sleep(0.5)
 
-    dilemma = meta.get("dilemma", "Help us make an important decision.")
+    dilemma           = meta.get("dilemma", "Help us make an important decision.")
     named_participants: list[str] = meta.get("participants", [])
-    logger.info("Start signal received. Dilemma: %s | Participants: %s", dilemma, named_participants)
+    location_ctx: str = meta.get("location", "")
+    logger.info("Start signal. Dilemma: %s | Location: %s | Participants: %s",
+                dilemma, location_ctx, named_participants)
 
-    # All participants who joined during the waiting phase are already present
-    participant = await ctx.wait_for_participant()
+    await ctx.wait_for_participant()
     logger.info("Participants ready, launching sessions")
 
-    # ── Optimizer session — own room connection with known identity ───────────
-    optimizer_room = rtc.Room()
+    # Shared mutable state (list containers for closure capture)
+    current_speaker:  list[str]  = [""]
+    transcript_buffer: list[str] = []
+    turn_count:        list[int]  = [0]
+    debate_ended:      list[bool] = [False]
+
+    # ── Optimizer session ────────────────────────────────────────────────────
+    optimizer_room  = rtc.Room()
     optimizer_token = _make_agent_token(ctx.room.name, "optimizer")
     await optimizer_room.connect(livekit_url, optimizer_token)
-    logger.info("Optimizer room connected")
 
     optimizer_session = AgentSession(
         llm=RealtimeModel(
@@ -139,11 +311,10 @@ async def entrypoint(ctx: JobContext) -> None:
         )
     )
 
-    # ── Vibe-Check session — own room connection with known identity ──────────
-    vibe_room = rtc.Room()
+    # ── Vibe-Check session ───────────────────────────────────────────────────
+    vibe_room  = rtc.Room()
     vibe_token = _make_agent_token(ctx.room.name, "vibe-check")
     await vibe_room.connect(livekit_url, vibe_token)
-    logger.info("Vibe-Check room connected")
 
     vibe_session = AgentSession(
         llm=RealtimeModel(
@@ -166,82 +337,115 @@ async def entrypoint(ctx: JobContext) -> None:
         if ev.new_state == "speaking":
             optimizer_session.interrupt()
 
-    # ── Text Bridge ──────────────────────────────────────────────────────────
+    # ── Text Bridge + Transcript Capture ─────────────────────────────────────
     @optimizer_session.on("conversation_item_added")
     def _opt_item(ev: ConversationItemAddedEvent) -> None:
-        if ev.item.type != "message" or ev.item.role != "assistant":
+        if ev.item.type != "message":
             return
-        text = ev.item.text_content or ""
-        if text.strip():
-            vibe_session.generate_reply(
-                user_input=f"[Optimizer just said]: {text}"
-            )
+        text = (ev.item.text_content or "").strip()
+        if not text:
+            return
+        if ev.item.role == "assistant":
+            turn_count[0] += 1
+            transcript_buffer.append(f"Optimizer: {text}")
+            vibe_session.generate_reply(user_input=f"[Optimizer just said]: {text}")
+        elif ev.item.role == "user":
+            speaker = current_speaker[0] or "User"
+            transcript_buffer.append(f"{speaker}: {text}")
 
     @vibe_session.on("conversation_item_added")
     def _vibe_item(ev: ConversationItemAddedEvent) -> None:
-        if ev.item.type != "message" or ev.item.role != "assistant":
+        if ev.item.type != "message":
             return
-        text = ev.item.text_content or ""
-        if text.strip():
-            optimizer_session.generate_reply(
-                user_input=f"[Vibe-Check just said]: {text}"
-            )
+        text = (ev.item.text_content or "").strip()
+        if not text:
+            return
+        if ev.item.role == "assistant":
+            turn_count[0] += 1
+            transcript_buffer.append(f"Vibe-Check: {text}")
+            optimizer_session.generate_reply(user_input=f"[Vibe-Check just said]: {text}")
 
-    # ── Speaker tracking — updated via LiveKit data channel ─────────────────
-    current_speaker: list[str] = [""]  # mutable container for closure capture
-
+    # ── Data Channel: speaker changes + consensus signal ─────────────────────
     @ctx.room.on("data_received")
     def _on_data(data: rtc.DataPacket) -> None:
         try:
             msg = json.loads(data.data.decode())
-            if msg.get("type") == "speaker":
-                name = str(msg.get("name", "")).strip()
-                current_speaker[0] = name
-                if name:
-                    logger.info("Speaker changed to: %s", name)
-                    optimizer_session.generate_reply(
-                        user_input=f"[{name} is now speaking — listen for their voice]"
-                    )
-                else:
-                    logger.info("Speaker deselected")
         except Exception:
-            pass
+            return
 
-    # ── Start both sessions — hear all room participants ─────────────────────
+        if msg.get("type") == "speaker":
+            name = str(msg.get("name", "")).strip()
+            current_speaker[0] = name
+            if name:
+                logger.info("Speaker → %s", name)
+                optimizer_session.generate_reply(
+                    user_input=f"[{name} is now speaking — listen for their voice]"
+                )
+
+        elif msg.get("type") == "consensus":
+            if debate_ended[0]:
+                return
+            logger.info("Consensus signal received from UI")
+            debate_ended[0] = True
+            optimizer_session.generate_reply(
+                user_input="[WRAP UP]: The group has reached a decision — deliver your final verdict in one punchy sentence and sign off."
+            )
+            vibe_session.generate_reply(
+                user_input="[WRAP UP]: React to the Optimizer's verdict dramatically in one sentence and sign off."
+            )
+
+    # ── Start both sessions ──────────────────────────────────────────────────
     asyncio.create_task(
-        optimizer_session.start(
-            Agent(instructions=OPTIMIZER_INSTRUCTIONS),
-            room=optimizer_room,
-        )
+        optimizer_session.start(Agent(instructions=OPTIMIZER_INSTRUCTIONS), room=optimizer_room)
     )
     asyncio.create_task(
-        vibe_session.start(
-            Agent(instructions=VIBE_INSTRUCTIONS),
-            room=vibe_room,
-        )
+        vibe_session.start(Agent(instructions=VIBE_INSTRUCTIONS), room=vibe_room)
     )
 
-    # Give sessions a moment to connect before seeding the debate
     await asyncio.sleep(2.0)
 
-    # Build participant intro string for seeding
+    # ── Seed the debate ──────────────────────────────────────────────────────
     if named_participants:
         people_str = ", ".join(named_participants)
-        participant_context = f"The people in the room are: {people_str}. They share one microphone and will tap their name before speaking so you know who it is."
+        participant_context = (
+            f"The people in the room are: {people_str}. "
+            "They share one microphone and will tap their name before speaking so you know who it is."
+        )
     else:
-        num_people = len(list(ctx.room.remote_participants.values()))
-        participant_context = f"There are {num_people} people sharing one microphone — they'll take turns speaking into it."
+        num = len(list(ctx.room.remote_participants.values()))
+        participant_context = f"There are {num} people sharing one microphone."
 
-    # Seed Optimizer with the dilemma — Vibe-Check reacts via text bridge
+    location_line = f"Current context: {location_ctx}. " if location_ctx else ""
+
     optimizer_session.generate_reply(
         user_input=(
-            f"[SYSTEM]: The user's dilemma is: \"{dilemma}\". "
+            f"[SYSTEM]: The dilemma is: \"{dilemma}\". "
+            f"{location_line}"
             f"{participant_context} "
-            "Welcome everyone by name if you know them, and kick off the debate in one short sentence."
+            "Welcome everyone by name if you know them, reference the time or place if it's relevant, and kick off the debate in one short sentence."
         )
     )
 
-    logger.info("Debate started for dilemma: %s", dilemma)
+    logger.info("Debate started. Launching background tasks.")
+
+    # ── Background: web search + orchestrator ────────────────────────────────
+    search_results: list[dict] = []
+
+    async def _fetch_and_orchestrate() -> None:
+        nonlocal search_results
+        search_results = await _run_web_search(dilemma, location_ctx or "unknown location")
+        await orchestrator_loop(
+            dilemma=dilemma,
+            location_ctx=location_ctx,
+            transcript_buffer=transcript_buffer,
+            turn_count=turn_count,
+            search_results=search_results,
+            optimizer_session=optimizer_session,
+            vibe_session=vibe_session,
+            debate_ended=debate_ended,
+        )
+
+    asyncio.create_task(_fetch_and_orchestrate())
 
 
 # ---------------------------------------------------------------------------

@@ -13,7 +13,7 @@ import {
 } from "@livekit/components-react";
 import type { Participant, TranscriptionSegment } from "livekit-client";
 import QRCode from "qrcode";
-import { ArrowRight, Copy, LogOut, Mic, MicOff, QrCode, Radio, Users } from "lucide-react";
+import { ArrowRight, CheckCircle, Copy, LogOut, Mic, MicOff, QrCode, Radio, Users } from "lucide-react";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -169,6 +169,14 @@ function RoomContent({ dilemma, participants, onLeave }: { dilemma: string; part
   const { state, audioTrack } = useVoiceAssistant();
   const room = useRoomContext();
   const [speakerLabel, setSpeakerLabel] = useState("");
+  const [consensusSent, setConsensusSent] = useState(false);
+
+  function sendConsensus() {
+    if (consensusSent) return;
+    setConsensusSent(true);
+    const payload = new TextEncoder().encode(JSON.stringify({ type: "consensus" }));
+    room.localParticipant.publishData(payload, { reliable: true });
+  }
 
   useEffect(() => {
     const onActiveChange = () => {
@@ -238,8 +246,23 @@ function RoomContent({ dilemma, participants, onLeave }: { dilemma: string; part
       {/* Live transcript */}
       <TranscriptPanel />
 
-      {/* Mic / disconnect controls */}
-      <ParticipantControls onLeave={onLeave} showMic={participants.length === 0} />
+      {/* Consensus + leave controls */}
+      <div className="flex flex-col items-center gap-3">
+        <button
+          type="button"
+          onClick={sendConsensus}
+          disabled={consensusSent}
+          className={`flex items-center gap-2 rounded-full px-6 py-3 text-sm font-semibold transition ${
+            consensusSent
+              ? "bg-emerald-500/10 text-emerald-400/50 cursor-default"
+              : "bg-emerald-500/20 text-emerald-400 hover:bg-emerald-500/30"
+          }`}
+        >
+          <CheckCircle size={16} />
+          {consensusSent ? "Wrapping up…" : "We've decided!"}
+        </button>
+        <ParticipantControls onLeave={onLeave} showMic={participants.length === 0} />
+      </div>
 
       {/* Renders all remote audio tracks so the agents can be heard */}
       <RoomAudioRenderer />
@@ -347,7 +370,7 @@ function AgentCard({
 
 const AGENT_IDENTITIES = new Set(["optimizer", "vibe-check"]);
 
-function WaitingRoom({ roomName, dilemma, participants }: { roomName: string; dilemma: string; participants: string[] }) {
+function WaitingRoom({ roomName, dilemma, participants, locationCtx }: { roomName: string; dilemma: string; participants: string[]; locationCtx: string }) {
   const room = useRoomContext();
   const allParticipants = useParticipants();
   const [starting, setStarting] = useState(false);
@@ -361,7 +384,7 @@ function WaitingRoom({ roomName, dilemma, participants }: { roomName: string; di
       await fetch("/api/start", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ roomName, dilemma, participants }),
+        body: JSON.stringify({ roomName, dilemma, participants, location: locationCtx }),
       });
     } catch {
       setStarting(false);
@@ -427,12 +450,14 @@ function RoomInner({
   dilemma,
   setDilemma,
   participants,
+  locationCtx,
   onLeave,
 }: {
   roomName: string;
   dilemma: string;
   setDilemma: (d: string) => void;
   participants: string[];
+  locationCtx: string;
   onLeave: () => void;
 }) {
   const room = useRoomContext();
@@ -453,7 +478,7 @@ function RoomInner({
     return () => void room.off("roomMetadataChanged", parseMeta);
   }, [room, setDilemma]);
 
-  if (!started) return <WaitingRoom roomName={roomName} dilemma={dilemma} participants={participants} />;
+  if (!started) return <WaitingRoom roomName={roomName} dilemma={dilemma} participants={participants} locationCtx={locationCtx} />;
   return <RoomContent dilemma={dilemma} participants={participants} onLeave={onLeave} />;
 }
 
@@ -470,6 +495,7 @@ export default function RoomPage() {
   const [dilemma, setDilemma] = useState("");
   const [error, setError] = useState("");
   const [copied, setCopied] = useState(false);
+  const [locationCtx, setLocationCtx] = useState("");
   const [participants] = useState<string[]>(() => {
     if (typeof window === "undefined") return [];
     try {
@@ -505,6 +531,38 @@ export default function RoomPage() {
     }
     fetchToken();
   }, [roomName]);
+
+  useEffect(() => {
+    const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    const localTime = new Date().toLocaleString("en-US", {
+      timeZone: timezone,
+      weekday: "long",
+      hour: "numeric",
+      minute: "numeric",
+      hour12: true,
+    });
+    navigator.geolocation.getCurrentPosition(
+      async (pos) => {
+        try {
+          const res = await fetch(
+            `https://nominatim.openstreetmap.org/reverse?lat=${pos.coords.latitude}&lon=${pos.coords.longitude}&format=json`,
+            { headers: { "Accept-Language": "en" } },
+          );
+          const data = await res.json();
+          const city =
+            data.address?.city ||
+            data.address?.town ||
+            data.address?.village ||
+            "Unknown city";
+          const country = data.address?.country || "";
+          setLocationCtx(`${localTime}, ${city}, ${country}`);
+        } catch {
+          setLocationCtx(`${localTime}, ${timezone}`);
+        }
+      },
+      () => setLocationCtx(`${localTime}, ${timezone}`),
+    );
+  }, []);
 
   const onCopy = useCallback(async () => {
     await navigator.clipboard.writeText(shareUrl);
@@ -560,6 +618,7 @@ export default function RoomPage() {
           dilemma={dilemma}
           setDilemma={setDilemma}
           participants={participants}
+          locationCtx={locationCtx}
           onLeave={() => router.push("/")}
         />
       </LiveKitRoom>
