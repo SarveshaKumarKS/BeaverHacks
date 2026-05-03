@@ -12,7 +12,7 @@
 
 ## What the app does
 
-Two AI voice agents ("The Optimizer" and "The Vibe-Check") debate the user's dilemma in real-time audio inside a shared LiveKit room. Multiple humans join via QR code and share the host's microphone to speak to the agents. A live transcript is rendered in the browser. A silent Nemotron orchestrator runs in the background, injecting web-search results and steering the debate.
+Two AI voice agents ("The Optimizer" and "The Vibe-Check") debate the user's dilemma in real-time audio inside a shared LiveKit room. Multiple humans join via QR code and share the host's microphone to speak to the agents. A live transcript is rendered in the browser. A silent Nemotron orchestrator runs in the background, injecting web-search results and steering the debate toward a decision.
 
 ---
 
@@ -68,7 +68,7 @@ LIVEKIT_URL=wss://beavorhack-28w72ye0.livekit.cloud
 LIVEKIT_API_KEY=<your LiveKit API key>
 LIVEKIT_API_SECRET=<your LiveKit API secret>
 NVIDIA_API_KEY=<your NVIDIA NIM key>
-NVIDIA_NEMOTRON_MODEL=nvidia/llama-3.3-nemotron-super-49b-v1
+NVIDIA_NEMOTRON_MODEL=nvidia/llama-3.1-nemotron-70b-instruct
 NVIDIA_BASE_URL=https://integrate.api.nvidia.com/v1
 TAVILY_API_KEY=<your Tavily search key>
 ```
@@ -100,11 +100,16 @@ Each `AgentSession` publishes audio as a distinct room participant. If two sessi
 **Waiting room / start signal flow:**
 Room metadata is initialised as `{ dilemma: "...", status: "waiting" }` when the room is created. The backend worker polls `ctx.room.metadata` every 0.5s. When the host clicks "Start Debate", the frontend POSTs to `/api/start` which calls `RoomServiceClient.updateRoomMetadata(roomName, { dilemma, status: "started", participants, location })`. The worker detects the change and proceeds to connect both agent rooms and start sessions.
 
-**Dilemma + location caching (race condition fix):**
-The room page reads dilemma and participants from `sessionStorage` on first render (keys: `lk-dilemma-${roomName}`, `lk-participants-${roomName}`). Location is resolved async (browser geolocation → Nominatim → IP fallback) and stored in `locationCtx` state. The `/api/start` POST includes the current `locationCtx`. There is a small race window if the host clicks "Start Debate" before `locationCtx` is populated — location may be empty. Dilemma is always present (sessionStorage fix); location is best-effort.
+**Location resolution (guaranteed, no race condition):**
+Location is resolved on the **landing page** (`page.tsx`) as soon as the page loads — before the room is even created. It's stored in `sessionStorage` as `lk-location-${roomName}` when the room is created. The room page reads it from `sessionStorage` on first render, so the host always has it ready before "Start Debate" is clickable. The "Start Debate" button is disabled and shows "Getting location…" until `locationCtx` is non-empty. The location resolution chain:
+1. `navigator.geolocation.getCurrentPosition` → Nominatim reverse geocode (5s timeout)
+2. If denied/fails → `https://ipapi.co/json/` (IP geolocation, no permission needed)
+3. If that fails → local time + timezone string
 
-**IP geolocation fallback:**
-If the browser denies geolocation permission, the frontend falls back to `https://ipapi.co/json/` (no API key, no permission prompt) to get city + country. If that also fails, it falls back to the local time + timezone string. Location string format: `"Monday 9:42 PM, Corvallis, Oregon, US"`.
+Location string format: `"Monday 9:42 PM, Corvallis, Oregon, United States"`.
+
+**Server-side IP geolocation fallback (`_get_location_from_ip`):**
+If the frontend somehow sends empty location (e.g. guests who don't have the sessionStorage key), the backend resolves location server-side via `ipapi.co/json/` using stdlib `urllib`. This is a last-resort safety net so web search always has a location.
 
 **Multi-speaker design:**
 Gemini Live API accepts only a single audio stream — only the host's microphone audio reaches the agents. The workaround: guests physically gather around the host's device and take turns speaking. The frontend sends `speaker` data channel messages when a user taps their name button — both agents are notified so they can address the speaker by name.
@@ -124,13 +129,15 @@ When one agent starts speaking, it immediately calls `interrupt()` on the other.
 ```python
 @optimizer_session.on("conversation_item_added")
 def _opt_item(ev):
+    if debate_ended[0]:
+        return  # stop cross-feeding after wrap-up
     now = time.monotonic()
     if vibe_state[0] != "speaking" and len(text) > 15 and (now - last_opt_bridge[0]) > BRIDGE_COOLDOWN:
         _safe_reply(vibe_session, f"[Optimizer just said]: {text}")
         last_opt_bridge[0] = now
 # (mirror for vibe_session)
 ```
-Agents never hear each other's audio. Instead, the transcript of each turn is injected into the other agent's context as a user message. `BRIDGE_COOLDOWN = 4.0` seconds prevents rapid back-and-forth echo loops. A 15-character minimum also filters trivial turns.
+Agents never hear each other's audio. Instead, the transcript of each turn is injected into the other agent's context as a user message. `BRIDGE_COOLDOWN = 4.0` seconds prevents rapid back-and-forth echo loops. A 15-character minimum filters trivial turns. **The bridge is gated on `debate_ended[0]`** — once the wrap-up button is pressed, agents stop receiving each other's messages and go quiet naturally.
 
 **`_safe_reply` helper (module level):**
 ```python
@@ -143,41 +150,58 @@ def _safe_reply(session: AgentSession, text: str) -> None:
 All `generate_reply` calls go through this. Swallows exceptions during Gemini reconnects. **Must stay at module level** — defining it inside a closure causes `NameError` (was a prior bug).
 
 **Debate seeding:**
-After a 2-second sleep (letting sessions connect), the Optimizer is seeded with the dilemma, location context, and participant names from room metadata. Vibe-Check reacts via the text bridge.
+After a 2-second sleep (letting sessions connect), the Optimizer is seeded with the dilemma, location context, and participant names. The seed prompt tells the Optimizer to welcome participants by name, reference time/place, then **immediately pick one side of the dilemma and argue for it in one sharp sentence**. Vibe-Check reacts via the text bridge and must take the opposite side.
 
-**System prompts — PRIORITY ORDER:**
-Both agents have a `PRIORITY ORDER` section:
-1. If a human just spoke: ALWAYS react to their specific opinion first (by name, challenge/mock/gasp).
-2. Only then react to the co-host.
+**System prompts — structure:**
+Both agents have three key sections:
+1. **CRITICAL (opening)**: Take a position immediately on the first turn — no meta-commentary about the debate.
+2. **PRIORITY ORDER**: React to humans first (by name), co-host second.
+3. **USE SEARCH RESULTS**: When given specific facts, names, stats, or details from a web search, state at least two specifics out loud by name — never paraphrase. Then ask the humans if any of it changes their thinking. This is intentionally generic (not "place names") so it works for food, tech, career, travel, or any dilemma type.
+4. **CONVERGENCE**: Once humans lean toward one option, stop abstract debate and ask a specific follow-up question to finalize the decision.
 
-Both agents: "If you receive a fun fact, local info, or a specific place name, say it out loud in your next sentence — do not paraphrase." Response length: 1-2 short sentences max.
+Response length: 1-2 short sentences max.
+
+**Wrap-up / consensus flow:**
+When the user clicks "We've decided!" in the UI:
+1. Frontend sends `{ type: "consensus" }` via data channel
+2. Backend sets `debate_ended[0] = True` — stops orchestrator loop and text bridge
+3. Optimizer is immediately prompted for a funny one-sentence final verdict
+4. After 6 seconds (letting Optimizer finish speaking), Vibe-Check is prompted for a dramatic sign-off
+5. After 10 more seconds (16s total from button press), both sessions are interrupted via `session.interrupt()` to fully silence audio
 
 ---
 
 ### Orchestrator loop (`orchestrator_loop`)
 
-Runs every 25 seconds after a 30-second warm-up delay. Uses NVIDIA Nemotron (`nvidia/llama-3.3-nemotron-super-49b-v1`) via OpenAI-compatible API.
+Runs every **10 seconds** after a **15-second** warm-up delay. Uses NVIDIA Nemotron (`nvidia/llama-3.1-nemotron-70b-instruct`) via OpenAI-compatible API. `max_tokens=200` keeps responses fast and focused.
 
 **Actions:**
 | Action | What happens |
 |---|---|
 | `continue` | No injection |
-| `inject_search` | Injects into Optimizer: `"say a SPECIFIC place name from this out loud in your very next sentence — no paraphrasing, just name it: {result}"` |
+| `inject_search` | Injects Tavily results directly (raw titles + content, not summarized) into Optimizer; asks humans if it changes their thinking |
 | `ask_user` | Sends question to Optimizer immediately; 3s later sends to Vibe as fallback |
 | `push_consensus` | Tells Optimizer to wrap toward a verdict |
 | `end_debate` | Tells both agents to give verdict + sign off; sets `debate_ended[0] = True` |
 
-**Nemotron JSON reliability:** Nemotron sometimes returns `{}`. Code strips markdown fences and truncation-guards with `raw[:raw.rfind("}")+1]`. Still occasional — defaults safely to `action = "continue"`.
+**JSON reliability:** Uses `re.search(r"\{[^{}]*\}", raw)` to extract the first JSON object from the response — handles cases where the model wraps output in prose or markdown fences. Defaults safely to `action = "continue"` if parsing fails.
+
+> **Model history:** Previously used `nvidia/llama-3.3-nemotron-super-49b-v1` which returned `{}` on ~80% of calls causing multi-minute gaps in orchestration. Switched to `nvidia/llama-3.1-nemotron-70b-instruct` which is significantly more reliable for JSON-only output.
 
 ---
 
 ### Web search (`_run_web_search`)
 
-Tavily search runs in a thread executor (sync client). Two parallel queries:
-- `"best {dilemma} places near {location_hint}"`
-- `"top rated {dilemma} restaurants {location_hint}"`
+Tavily search runs in a thread executor (sync client). Two parallel queries using the first 80 characters of the dilemma (not the full string, which produces terrible search queries):
+- `"best {dilemma[:80]} near {location_hint}"` (omits location suffix if empty)
+- `"top rated {dilemma[:80]} {location_hint}"`
 
-Location hint: `parts[1]` from the location string (index 1 = city in `"Monday 9:42 PM, Corvallis, Oregon, US"`). Falls back to `parts[-1]` if fewer than 3 parts.
+Location hint: `parts[1]` from the location string (city at index 1 in `"Monday 9:42 PM, City, Country"`). Falls back to `parts[0]` if fewer than 3 parts.
+
+**Auto-injection (no orchestrator decision needed):**
+As soon as search results arrive, they are **automatically injected** into the Optimizer without waiting for the orchestrator to choose `inject_search`. The inject prompt tells the Optimizer to state at least two specific names/facts/details from the results out loud and ask the humans if any of it changes their thinking. The orchestrator can still inject again later via its own `inject_search` action, but results are never held back waiting for it.
+
+Raw Tavily `title` + first 150 chars of `content` are passed directly to agents — the orchestrator is never asked to summarize them, which previously caused specific names and facts to be lost.
 
 ---
 
@@ -233,9 +257,12 @@ Standard Tailwind directives + dark background gradient. No LiveKit import here 
 1. **Form view** (default): textarea for the dilemma + optional participant name inputs + "Start the Debate" button.
 2. **Lobby view** (after submit): QR code (320×320, dark-themed), copyable share URL, and "Enter Room" button.
 
+**Location resolution starts immediately on page load** via `useEffect`. By the time the user fills in the dilemma and clicks "Start the Debate", location is already resolved. Stored in `sessionStorage` as `lk-location-${roomName}` when the room is created. A small location hint (city, country) is shown below the form so the user can confirm it's correct.
+
 **Flow:**
+- Page loads → location resolution starts in background
 - Submit → POST `/api/token` with `{ roomName, identity, dilemma, participants }`
-- Caches `token`, `wsUrl`, `participants`, and `dilemma` in `sessionStorage` keyed by room name
+- Caches `token`, `wsUrl`, `participants`, `dilemma`, and **`location`** in `sessionStorage` keyed by room name
 - User clicks "Enter Room" → `router.push(/room/${roomName})`
 
 ### `src/app/api/token/route.ts` — Token API
@@ -261,18 +288,11 @@ Standard Tailwind directives + dark background gradient. No LiveKit import here 
 - Host: reads cached token from `sessionStorage`
 - Guest: fetches via GET `/api/token?room=...`
 
-**Dilemma initialization:**
-`dilemma` state is initialized from `sessionStorage.getItem(`lk-dilemma-${roomName}`)` on first render — not from `roomMetadataChanged` (which arrives async and causes a race condition if used for Start).
+**Location initialization (race-condition free):**
+`locationCtx` state is initialized directly from `sessionStorage.getItem(`lk-location-${roomName}`)` on first render — already populated by the landing page. The location `useEffect` only runs if `locationCtx` is empty (guest path, where sessionStorage has no cached location).
 
-**Location resolution (two-phase):**
-```typescript
-navigator.geolocation.getCurrentPosition(
-    async (pos) => { /* Nominatim reverse geocode, 5s timeout */ },
-    () => resolveLocationFromIP(),  // fallback: ipapi.co/json/
-    { timeout: 5000 }
-);
-```
-Result stored in `locationCtx` state, sent to `/api/start`.
+**Dilemma initialization:**
+`dilemma` state is initialized from `sessionStorage.getItem(`lk-dilemma-${roomName}`)` on first render.
 
 **`RoomInner` — metadata router:**
 - `status === "waiting"` → renders `WaitingRoom`
@@ -280,19 +300,17 @@ Result stored in `locationCtx` state, sent to `/api/start`.
 
 **`WaitingRoom`:**
 - Filters out agents via `AGENT_IDENTITIES = new Set(["optimizer", "vibe-check"])`.
-- Host sees "Start Debate" button → POSTs to `/api/start`
+- Host sees "Start Debate" button — **disabled and shows "Getting location…" until `locationCtx` is non-empty**
 - Guests see "Waiting for host to start…"
 - Known cosmetic issue: job worker participant also appears in the list (identity is dispatch-assigned, not in the blocklist). Fix: switch to allowlist `host-*` / `guest-*`.
 
 **`RoomContent`:**
 - Two `AgentCard` components (amber = Optimizer, fuchsia = Vibe-Check) with speaking pulse
 - `BarVisualizer` (24 bars), `TranscriptPanel`, `ParticipantControls`, `RoomAudioRenderer`
+- **"We've decided!" button** sends `{ type: "consensus" }` → triggers agent wrap-up sequence (see wrap-up flow above)
 
 **Speaker name tapping (data channel):**
-Users tap a name button → sends `{ type: "speaker", name: "Alice" }`. Backend notifies both agents.
-
-**`ParticipantControls`:**
-Uses `useLocalParticipant()` + `setMicrophoneEnabled(true)` on mount so mic is on by default.
+Users tap a name button → sends `{ type: "speaker", name: "Alice" }`. Backend notifies both agents so they address the speaker by name.
 
 **`TranscriptPanel` + `useTranscript` hook:**
 - `room.on("transcriptionReceived", ...)` — fired by LiveKit for agent TTS and human STT
@@ -327,34 +345,12 @@ LIVEKIT_API_SECRET=<secret>
 
 ---
 
-## Recent changes (session log)
-
-### Session 2 — bug fixes
-- **`NameError: _safe_reply`**: Was defined inside `orchestrator_loop` closure. Moved to module level.
-- **Race condition — empty dilemma on Start**: `dilemma` state now initialized from `sessionStorage` on first render.
-- **No location permission in browser**: Added IP geolocation fallback (`ipapi.co/json/`).
-- **1008 Gemini errors at ~20s**: Text bridge was calling `generate_reply` on a speaking session. Fixed with `optimizer_state` / `vibe_state` guard.
-- **Location extracting wrong city**: `split(",")[-2]` returned state. Fixed to `parts[1]` (city at index 1).
-- **Orchestrator injections not landing**: Made more directive ("stop debating", "ask them this exact question out loud").
-- **Agents saying bracket prefixes aloud**: Removed `[SYSTEM]:` and unnatural notations.
-- **Web search returning no local results**: Tavily queries now use city name at index 1 of location string.
-
-### Session 3 — engagement improvements
-- **PRIORITY ORDER in system prompts**: Agents must react to humans first, co-host second.
-- **2-sentence limit**: Increased from 1 to 1-2 sentences to reduce single-word loops.
-- **Bridge cooldown (4s)**: Prevents echo loops where agents only talk to each other.
-- **Search injection fill-in-the-blank**: `"say a SPECIFIC place name from this out loud — no paraphrasing, just name it"`.
-- **ask_user to both agents**: Optimizer first, Vibe gets it 3s later as fallback.
-- **Speaker signal to both agents**: Both `optimizer_session` and `vibe_session` notified on speaker tap.
-
----
-
 ## Known issues / decisions log
 
 | Issue | Resolution |
 |---|---|
 | `gemini-2.5-flash` throws 1008 | Use `gemini-2.0-flash-live-001` only |
-| Gemini 1008 at ~2 min | Natural context window limit. Sessions auto-reconnect. `_safe_reply` guard handles errors during reconnect. |
+| Gemini 1008 at ~9 min | Natural Gemini Live session time limit. Sessions auto-reconnect. `_safe_reply` guard handles errors during reconnect. |
 | `livekit-server-sdk` pip package doesn't exist | Token generation stays in Next.js; Python uses `livekit-api` (auto-installed with livekit-agents) |
 | `@import "@livekit/components-styles"` breaks webpack | Import via JS in `layout.tsx` using `@livekit/components-styles/index.css` |
 | Both agents labeled "You" in transcript | Agent identities must be explicit: `"optimizer"` and `"vibe-check"` via `_make_agent_token` |
@@ -366,9 +362,15 @@ LIVEKIT_API_SECRET=<secret>
 | Guest mic was always muted | Replaced `VoiceAssistantControlBar` with custom `ParticipantControls` using `useLocalParticipant()` |
 | Agents only hear the first participant | Gemini Live API accepts one audio stream. Accepted as demo limitation. |
 | Job worker participant appears in waiting room list | Dispatch-assigned identity doesn't match `AGENT_IDENTITIES` blocklist. Known cosmetic issue. Fix: switch to allowlist. |
-| Orchestrator returns `{}` occasionally | Nemotron truncates JSON. Truncation guard in place. Defaults to `continue`. |
+| Orchestrator returned `{}` ~80% of calls with old model | Switched from `nvidia/llama-3.3-nemotron-super-49b-v1` to `nvidia/llama-3.1-nemotron-70b-instruct` |
+| Orchestrator still occasionally returns `{}` | `re.search` JSON extraction handles prose wrapping. Defaults to `continue`. |
 | `tavily-python` not in requirements.txt | Run `.venv/bin/pip install tavily-python` manually. |
-| Location empty in backend logs | Timing race — location resolves async. Dilemma is fixed (sessionStorage); location is best-effort. |
+| Location empty in backend logs | Fixed: location now resolved on landing page and cached in sessionStorage. Backend also has server-side IP fallback. |
+| Wrap-up button didn't stop agents | Fixed: text bridge gated on `debate_ended`; both sessions interrupted 16s after button press. |
+| Both agents triggered simultaneously on wrap-up | Fixed: Vibe-Check cue delayed 6s so Optimizer finishes verdict before Vibe reacts. |
+| Agents never named specific places/facts from search | Fixed: search results auto-injected immediately after fetch; raw Tavily data passed directly (not summarized). |
+| Search injection prompts were food-specific ("place names") | Fixed: prompts now say "specific names, facts, or details" — generic for any dilemma type. |
+| Full dilemma string used in search queries | Fixed: truncated to 80 chars to avoid garbage search queries. |
 
 ---
 
@@ -389,4 +391,4 @@ npm install
 npm run dev
 ```
 
-Open `http://localhost:3000`, enter a dilemma, add participant names, share the QR, then enter the room. All participants join the waiting room first; host clicks "Start Debate" to launch the agents.
+Open `http://localhost:3000`, enter a dilemma, add participant names, share the QR, then enter the room. All participants join the waiting room first; host clicks "Start Debate" to launch the agents. Location is detected automatically — the form shows the detected city/country so you can confirm it's correct before starting.
