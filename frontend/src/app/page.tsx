@@ -9,12 +9,17 @@ import { ArrowRight, Link2 } from "lucide-react";
 export default function HostLobby() {
   const router = useRouter();
   const [dilemma, setDilemma] = useState("");
-  const [shareUrl, setShareUrl] = useState("");
-  const [qr, setQr] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [copied, setCopied] = useState(false);
+
+  // Set once the room is created — triggers lobby view
+  const [roomName, setRoomName] = useState("");
+  const [shareUrl, setShareUrl] = useState("");
+  const [qr, setQr] = useState("");
 
   const canSubmit = useMemo(() => dilemma.trim().length > 0, [dilemma]);
+  const inLobby = shareUrl !== "";
 
   async function submit(event: FormEvent) {
     event.preventDefault();
@@ -22,13 +27,13 @@ export default function HostLobby() {
     setLoading(true);
     setError("");
     try {
-      const roomName = crypto.randomUUID();
+      const name = crypto.randomUUID();
       const identity = `host-${Date.now()}`;
 
       const res = await fetch("/api/token", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ roomName, identity, dilemma: dilemma.trim() }),
+        body: JSON.stringify({ roomName: name, identity, dilemma: dilemma.trim() }),
       });
 
       if (!res.ok) throw new Error(await res.text());
@@ -39,15 +44,19 @@ export default function HostLobby() {
         roomName: string;
       };
 
-      // Cache token so the room page can connect without a second round-trip
-      sessionStorage.setItem(`lk-token-${roomName}`, token);
-      sessionStorage.setItem(`lk-wsurl-${roomName}`, wsUrl);
+      sessionStorage.setItem(`lk-token-${name}`, token);
+      sessionStorage.setItem(`lk-wsurl-${name}`, wsUrl);
 
-      const url = `${window.location.origin}/room/${roomName}`;
+      const url = `${window.location.origin}/room/${name}`;
+      const dataUrl = await QRCode.toDataURL(url, {
+        margin: 2,
+        width: 320,
+        color: { dark: "#ffffff", light: "#0d1117" },
+      });
+
+      setRoomName(name);
       setShareUrl(url);
-      setQr(await QRCode.toDataURL(url, { margin: 1, width: 220 }));
-
-      router.push(`/room/${roomName}`);
+      setQr(dataUrl);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Something went wrong");
     } finally {
@@ -55,6 +64,57 @@ export default function HostLobby() {
     }
   }
 
+  async function copyLink() {
+    await navigator.clipboard.writeText(shareUrl);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1200);
+  }
+
+  // ── Lobby view ──────────────────────────────────────────────────────────────
+  if (inLobby) {
+    return (
+      <main className="mx-auto flex min-h-screen max-w-lg flex-col items-center justify-center gap-8 px-6 py-10">
+        <div className="text-center">
+          <p className="text-xs uppercase tracking-[0.26em] text-white/40">The Decider</p>
+          <h2 className="mt-2 text-2xl font-bold text-white">Arena ready</h2>
+          <p className="mt-2 text-white/50">
+            Share the QR code so others can join, then enter when ready.
+          </p>
+        </div>
+
+        {qr && (
+          <Image
+            src={qr}
+            alt="Room QR code"
+            width={320}
+            height={320}
+            unoptimized
+            className="rounded-2xl"
+          />
+        )}
+
+        <button
+          type="button"
+          onClick={copyLink}
+          className="flex items-center gap-2 text-sm text-white/50 transition hover:text-white/80"
+        >
+          <Link2 size={14} />
+          {copied ? "Copied!" : shareUrl}
+        </button>
+
+        <button
+          type="button"
+          onClick={() => router.push(`/room/${roomName}`)}
+          className="flex w-full items-center justify-center gap-2 rounded-md bg-amber-400 px-6 py-4 text-lg font-semibold text-black transition hover:bg-amber-300"
+        >
+          Enter Room
+          <ArrowRight size={20} />
+        </button>
+      </main>
+    );
+  }
+
+  // ── Landing / form view ─────────────────────────────────────────────────────
   return (
     <main className="mx-auto flex min-h-screen max-w-5xl flex-col justify-center px-6 py-10">
       <section className="grid gap-8 md:grid-cols-[1.1fr_0.9fr] md:items-center">
@@ -90,25 +150,6 @@ export default function HostLobby() {
             {loading ? "Spinning up the arena…" : "Start the Debate"}
             <ArrowRight size={18} />
           </button>
-
-          {shareUrl && (
-            <div className="mt-5 rounded-md border border-white/10 bg-white/5 p-4">
-              <div className="flex items-center gap-2 text-sm text-white/70">
-                <Link2 size={16} />
-                <span className="truncate">{shareUrl}</span>
-              </div>
-              {qr && (
-                <Image
-                  src={qr}
-                  alt="Room QR code"
-                  width={220}
-                  height={220}
-                  unoptimized
-                  className="mt-4 rounded-md bg-white p-2"
-                />
-              )}
-            </div>
-          )}
         </form>
       </section>
     </main>

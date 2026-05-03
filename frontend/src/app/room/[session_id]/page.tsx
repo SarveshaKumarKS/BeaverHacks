@@ -12,7 +12,8 @@ import {
 } from "@livekit/components-react";
 import "@livekit/components-styles";
 import type { Participant, TranscriptionSegment } from "livekit-client";
-import { Copy, Radio } from "lucide-react";
+import QRCode from "qrcode";
+import { Copy, QrCode, Radio } from "lucide-react";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -34,17 +35,19 @@ interface TranscriptLine {
   final: boolean;
 }
 
-function speakerName(participant: Participant): string {
+function speakerName(participant: Participant, localIdentity: string): string {
+  if (participant.identity === localIdentity) return "You";
   const id = participant.identity.toLowerCase();
-  if (id.includes("optimizer")) return "The Optimizer";
-  if (id.includes("vibe") || id.includes("check")) return "The Vibe-Check";
-  return "You";
+  if (id === "optimizer") return "The Optimizer";
+  if (id === "vibe-check") return "The Vibe-Check";
+  return participant.identity;
 }
 
 function speakerColor(speaker: string): string {
   if (speaker === "The Optimizer") return "text-amber-400";
   if (speaker === "The Vibe-Check") return "text-fuchsia-400";
-  return "text-sky-400";
+  if (speaker === "You") return "text-sky-400";
+  return "text-emerald-400";
 }
 
 function useTranscript() {
@@ -52,11 +55,12 @@ function useTranscript() {
   const [lines, setLines] = useState<TranscriptLine[]>([]);
 
   useEffect(() => {
+    const localIdentity = room.localParticipant.identity;
     const onTranscription = (
       segments: TranscriptionSegment[],
       participant: Participant,
     ) => {
-      const speaker = speakerName(participant);
+      const speaker = speakerName(participant, localIdentity);
       setLines((prev) => {
         const next = [...prev];
         for (const seg of segments) {
@@ -196,6 +200,37 @@ function RoomContent({ dilemma, setDilemma }: { dilemma: string; setDilemma: (d:
   );
 }
 
+function QRButton({ url }: { url: string }) {
+  const [open, setOpen] = useState(false);
+  const [dataUrl, setDataUrl] = useState("");
+
+  useEffect(() => {
+    if (!url) return;
+    QRCode.toDataURL(url, { width: 200, margin: 2, color: { dark: "#ffffff", light: "#0d1117" } })
+      .then(setDataUrl)
+      .catch(() => {});
+  }, [url]);
+
+  return (
+    <div className="relative">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        className="flex items-center gap-2 rounded-md border border-white/10 px-3 py-2 text-sm text-white/75 transition hover:border-fuchsia-400"
+      >
+        <QrCode size={16} />
+        Invite
+      </button>
+      {open && dataUrl && (
+        <div className="absolute right-0 top-full z-50 mt-2 rounded-xl border border-white/10 bg-[#0d1117] p-4 shadow-xl">
+          <p className="mb-2 text-center text-xs text-white/50">Scan to join</p>
+          <img src={dataUrl} alt="QR code" width={160} height={160} />
+        </div>
+      )}
+    </div>
+  );
+}
+
 function AgentCard({
   name,
   emoji,
@@ -293,14 +328,17 @@ export default function RoomPage() {
           <p className="text-xs uppercase tracking-[0.24em] text-amber">The Decider — Live Arena</p>
           <h1 className="text-xl font-semibold text-white/90">{dilemma || roomName}</h1>
         </div>
-        <button
-          type="button"
-          onClick={onCopy}
-          className="flex items-center gap-2 rounded-md border border-white/10 px-3 py-2 text-sm text-white/75 transition hover:border-amber"
-        >
-          <Copy size={16} />
-          {copied ? "Copied" : "Share"}
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={onCopy}
+            className="flex items-center gap-2 rounded-md border border-white/10 px-3 py-2 text-sm text-white/75 transition hover:border-amber-400"
+          >
+            <Copy size={16} />
+            {copied ? "Copied" : "Share"}
+          </button>
+          <QRButton url={shareUrl} />
+        </div>
       </header>
 
       <LiveKitRoom

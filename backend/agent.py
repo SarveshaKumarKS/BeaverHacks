@@ -31,7 +31,6 @@ from livekit.agents import (
     AgentSession,
     AutoSubscribe,
     JobContext,
-    RoomInputOptions,
     WorkerOptions,
     cli,
 )
@@ -102,7 +101,12 @@ async def entrypoint(ctx: JobContext) -> None:
     dilemma = ctx.room.metadata or "Help us make an important decision."
     livekit_url = os.getenv("LIVEKIT_URL", "ws://localhost:7880")
 
-    # ── Optimizer session — uses the job's existing room connection ──────────
+    # ── Optimizer session — own room connection with known identity ───────────
+    optimizer_room = rtc.Room()
+    optimizer_token = _make_agent_token(ctx.room.name, "optimizer")
+    await optimizer_room.connect(livekit_url, optimizer_token)
+    logger.info("Optimizer room connected")
+
     optimizer_session = AgentSession(
         llm=RealtimeModel(
             model=GEMINI_LIVE_MODEL,
@@ -113,7 +117,7 @@ async def entrypoint(ctx: JobContext) -> None:
         )
     )
 
-    # ── Vibe-Check session — separate room connection so it's a distinct participant
+    # ── Vibe-Check session — own room connection with known identity ──────────
     vibe_room = rtc.Room()
     vibe_token = _make_agent_token(ctx.room.name, "vibe-check")
     await vibe_room.connect(livekit_url, vibe_token)
@@ -161,21 +165,17 @@ async def entrypoint(ctx: JobContext) -> None:
                 user_input=f"[Vibe-Check just said]: {text}"
             )
 
-    # ── Start both sessions, subscribed only to the human's mic ─────────────
-    human_input = RoomInputOptions(participant_identity=participant.identity)
-
+    # ── Start both sessions — hear all room participants ─────────────────────
     asyncio.create_task(
         optimizer_session.start(
             Agent(instructions=OPTIMIZER_INSTRUCTIONS),
-            room=ctx.room,
-            room_input_options=human_input,
+            room=optimizer_room,
         )
     )
     asyncio.create_task(
         vibe_session.start(
             Agent(instructions=VIBE_INSTRUCTIONS),
             room=vibe_room,
-            room_input_options=human_input,
         )
     )
 
