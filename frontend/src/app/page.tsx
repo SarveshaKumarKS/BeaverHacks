@@ -62,6 +62,7 @@ export default function HostLobby() {
       sessionStorage.setItem(`lk-token-${name}`, token);
       sessionStorage.setItem(`lk-wsurl-${name}`, wsUrl);
       sessionStorage.setItem(`lk-participants-${name}`, JSON.stringify(participants));
+      sessionStorage.setItem(`lk-dilemma-${name}`, dilemma.trim());
 
       const url = `${window.location.origin}/room/${name}`;
       const dataUrl = await QRCode.toDataURL(url, {

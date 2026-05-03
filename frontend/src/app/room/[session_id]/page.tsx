@@ -492,7 +492,10 @@ export default function RoomPage() {
   const roomName = params.session_id;
 
   const [connectionDetails, setConnectionDetails] = useState<ConnectionDetails | null>(null);
-  const [dilemma, setDilemma] = useState("");
+  const [dilemma, setDilemma] = useState<string>(() => {
+    if (typeof window === "undefined") return "";
+    return sessionStorage.getItem(`lk-dilemma-${roomName}`) ?? "";
+  });
   const [error, setError] = useState("");
   const [copied, setCopied] = useState(false);
   const [locationCtx, setLocationCtx] = useState("");
