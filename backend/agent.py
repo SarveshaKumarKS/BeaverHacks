@@ -320,6 +320,8 @@ async def orchestrator_loop(
         elif action == "push_consensus":
             angle = decision.get("angle", "start driving toward a final answer")
             _safe_reply(optimizer_session, f"ok wrap it up — {angle}")
+            await asyncio.sleep(3)
+            _safe_reply(vibe_session, f"add your dramatic take — {angle}")
 
         elif action == "end_debate":
             verdict = decision.get("verdict", "the debate has concluded")
@@ -328,7 +330,7 @@ async def orchestrator_loop(
             debate_ended[0] = True
             break
 
-        await asyncio.sleep(10)
+        await asyncio.sleep(15)
 
 # ---------------------------------------------------------------------------
 # Entry point
@@ -362,12 +364,13 @@ async def entrypoint(ctx: JobContext) -> None:
     turn_count:        list[int]  = [0]
     debate_ended:      list[bool] = [False]
 
-    # Bridge cooldown — single shared timer prevents ping-pong echo loops
+    # Bridge cooldown — separate per-direction timers so each agent can bridge independently
     BRIDGE_COOLDOWN = 8.0
-    last_any_bridge: list[float] = [0.0]   # shared across both directions
-    last_opt_text:   list[str]   = [""]    # last text bridged FROM optimizer (echo detection)
-    last_vibe_text:  list[str]   = [""]    # last text bridged FROM vibe (echo detection)
-    last_vibe_turn:  list[int]   = [0]     # turn_count when vibe last spoke (watchdog)
+    last_opt_bridge:  list[float] = [0.0]  # last time optimizer→vibe bridge fired
+    last_vibe_bridge: list[float] = [0.0]  # last time vibe→optimizer bridge fired
+    last_opt_text:    list[str]   = [""]   # last text bridged FROM optimizer (echo detection)
+    last_vibe_text:   list[str]   = [""]   # last text bridged FROM vibe (echo detection)
+    last_vibe_turn:   list[int]   = [0]    # turn_count when vibe last spoke (watchdog)
 
     # ── Optimizer session ────────────────────────────────────────────────────
     optimizer_room  = rtc.Room()
@@ -379,7 +382,6 @@ async def entrypoint(ctx: JobContext) -> None:
             model=GEMINI_LIVE_MODEL,
             voice="Aoede",
             instructions=OPTIMIZER_INSTRUCTIONS,
-            temperature=1.0,
             api_key=GEMINI_API_KEY,
         )
     )
@@ -394,7 +396,6 @@ async def entrypoint(ctx: JobContext) -> None:
             model=GEMINI_LIVE_MODEL,
             voice="Kore",
             instructions=VIBE_INSTRUCTIONS,
-            temperature=1.0,
             api_key=GEMINI_API_KEY,
         )
     )
@@ -431,11 +432,11 @@ async def entrypoint(ctx: JobContext) -> None:
                 not debate_ended[0]
                 and vibe_state[0] != "speaking"
                 and len(text) > 15
-                and (now - last_any_bridge[0]) > BRIDGE_COOLDOWN
+                and (now - last_opt_bridge[0]) > BRIDGE_COOLDOWN
                 and text[:50] != last_vibe_text[0][:50]  # echo prevention
             ):
                 _safe_reply(vibe_session, f"[Optimizer just said]: {text}")
-                last_any_bridge[0] = now
+                last_opt_bridge[0] = now
                 last_opt_text[0] = text
         elif ev.item.role == "user":
             speaker = current_speaker[0] or "User"
@@ -466,11 +467,11 @@ async def entrypoint(ctx: JobContext) -> None:
                 not debate_ended[0]
                 and optimizer_state[0] != "speaking"
                 and len(text) > 15
-                and (now - last_any_bridge[0]) > BRIDGE_COOLDOWN
+                and (now - last_vibe_bridge[0]) > BRIDGE_COOLDOWN
                 and text[:50] != last_opt_text[0][:50]  # echo prevention
             ):
                 _safe_reply(optimizer_session, f"[Vibe-Check just said]: {text}")
-                last_any_bridge[0] = now
+                last_vibe_bridge[0] = now
                 last_vibe_text[0] = text
 
     # ── Data Channel: speaker changes + consensus signal ─────────────────────
