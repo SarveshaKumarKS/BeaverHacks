@@ -346,20 +346,21 @@ async def orchestrator_loop(
         first_session  = vibe_session      if _last_spoke[0] == "optimizer" else optimizer_session
         second_session = optimizer_session if _last_spoke[0] == "optimizer" else vibe_session
 
-        if action == "inject_search" and not search_injected and search_results:
-            # Build result text directly from raw Tavily results to preserve place names
-            raw_text = "; ".join(
-                f"{r.get('title', '')}: {r.get('content', '')[:150]}"
-                for r in search_results[:4]
-                if r.get("title")
-            )
-            result_text = raw_text or decision.get("result", "")
-            _safe_reply(
-                first_session,
-                f"state at least two specific names, facts, or details from this out loud right now (no paraphrasing), "
-                f"then react to what it means for the debate — don't ask a question: {result_text}",
-            )
-            search_injected = True
+        if action == "inject_search" and not search_injected:
+            search_injected = True  # mark done immediately — prevents infinite loop when search_results is empty
+            if search_results:
+                # Only inject REAL Tavily results — never the orchestrator's hallucinated summary
+                raw_text = "; ".join(
+                    f"{r.get('title', '')}: {r.get('content', '')[:150]}"
+                    for r in search_results[:4]
+                    if r.get("title")
+                )
+                if raw_text:
+                    _safe_reply(
+                        first_session,
+                        f"state at least two specific names, facts, or details from this out loud right now (no paraphrasing), "
+                        f"then react to what it means for the debate — don't ask a question: {raw_text}",
+                    )
 
         elif action == "ask_user":
             now = time.monotonic()
@@ -477,24 +478,21 @@ async def entrypoint(ctx: JobContext) -> None:
     @optimizer_session.on("agent_state_changed")
     def _opt_state(ev: AgentStateChangedEvent) -> None:
         optimizer_state[0] = ev.new_state
-        _optimizer_state_g[0] = ev.new_state  # mirror for _safe_reply visibility
+        _optimizer_state_g[0] = ev.new_state
         if ev.new_state == "speaking":
             vibe_session.interrupt()
-            # Hard alternation: if optimizer just spoke and is speaking again, cut it off
-            if _last_spoke[0] == "optimizer" and turn_count[0] > 0:
-                logger.debug("Alternation: interrupting optimizer (consecutive turn)")
-                optimizer_session.interrupt()
+            # Update _last_spoke immediately when speaking starts (don't wait for
+            # conversation_item_added which fires after the full turn completes).
+            # This closes the window where a second consecutive turn could slip through.
+            _last_spoke[0] = "optimizer"
 
     @vibe_session.on("agent_state_changed")
     def _vibe_state(ev: AgentStateChangedEvent) -> None:
         vibe_state[0] = ev.new_state
-        _vibe_state_g[0] = ev.new_state  # mirror for _safe_reply visibility
+        _vibe_state_g[0] = ev.new_state
         if ev.new_state == "speaking":
             optimizer_session.interrupt()
-            # Hard alternation: if vibe just spoke and is speaking again, cut it off
-            if _last_spoke[0] == "vibe" and turn_count[0] > 0:
-                logger.debug("Alternation: interrupting vibe-check (consecutive turn)")
-                vibe_session.interrupt()
+            _last_spoke[0] = "vibe"
 
     # ── Text Bridge + Transcript Capture ─────────────────────────────────────
     @optimizer_session.on("conversation_item_added")
