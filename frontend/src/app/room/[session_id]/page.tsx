@@ -5,14 +5,14 @@ import { useParams, useRouter } from "next/navigation";
 import {
   LiveKitRoom,
   BarVisualizer,
-  VoiceAssistantControlBar,
   RoomAudioRenderer,
   useVoiceAssistant,
   useRoomContext,
+  useLocalParticipant,
 } from "@livekit/components-react";
 import type { Participant, TranscriptionSegment } from "livekit-client";
 import QRCode from "qrcode";
-import { Copy, QrCode, Radio } from "lucide-react";
+import { Copy, LogOut, Mic, MicOff, QrCode, Radio } from "lucide-react";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -114,7 +114,7 @@ function TranscriptPanel() {
 // Inner room UI — rendered inside <LiveKitRoom>
 // ---------------------------------------------------------------------------
 
-function RoomContent({ dilemma, setDilemma }: { dilemma: string; setDilemma: (d: string) => void }) {
+function RoomContent({ dilemma, setDilemma, onLeave }: { dilemma: string; setDilemma: (d: string) => void; onLeave: () => void }) {
   const { state, audioTrack } = useVoiceAssistant();
   const room = useRoomContext();
   const [speakerLabel, setSpeakerLabel] = useState("");
@@ -192,10 +192,43 @@ function RoomContent({ dilemma, setDilemma }: { dilemma: string; setDilemma: (d:
       <TranscriptPanel />
 
       {/* Mic / disconnect controls */}
-      <VoiceAssistantControlBar controls={{ leave: true }} />
+      <ParticipantControls onLeave={onLeave} />
 
       {/* Renders all remote audio tracks so the agents can be heard */}
       <RoomAudioRenderer />
+    </div>
+  );
+}
+
+function ParticipantControls({ onLeave }: { onLeave: () => void }) {
+  const { localParticipant, isMicrophoneEnabled } = useLocalParticipant();
+
+  useEffect(() => {
+    localParticipant.setMicrophoneEnabled(true);
+  }, [localParticipant]);
+
+  return (
+    <div className="flex items-center gap-3">
+      <button
+        type="button"
+        onClick={() => localParticipant.setMicrophoneEnabled(!isMicrophoneEnabled)}
+        className={`flex items-center gap-2 rounded-full px-5 py-3 text-sm font-semibold transition ${
+          isMicrophoneEnabled
+            ? "bg-white/10 text-white hover:bg-white/20"
+            : "bg-red-500/20 text-red-400 hover:bg-red-500/30"
+        }`}
+      >
+        {isMicrophoneEnabled ? <Mic size={16} /> : <MicOff size={16} />}
+        {isMicrophoneEnabled ? "Mute" : "Unmute"}
+      </button>
+      <button
+        type="button"
+        onClick={onLeave}
+        className="flex items-center gap-2 rounded-full bg-red-500/20 px-5 py-3 text-sm font-semibold text-red-400 transition hover:bg-red-500/30"
+      >
+        <LogOut size={16} />
+        Leave
+      </button>
     </div>
   );
 }
@@ -348,7 +381,11 @@ export default function RoomPage() {
         video={false}
         onDisconnected={() => router.push("/")}
       >
-        <RoomContent dilemma={dilemma} setDilemma={setDilemma} />
+        <RoomContent
+          dilemma={dilemma}
+          setDilemma={setDilemma}
+          onLeave={() => router.push("/")}
+        />
       </LiveKitRoom>
     </main>
   );
