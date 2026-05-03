@@ -116,7 +116,8 @@ async def entrypoint(ctx: JobContext) -> None:
         await asyncio.sleep(0.5)
 
     dilemma = meta.get("dilemma", "Help us make an important decision.")
-    logger.info("Start signal received. Dilemma: %s", dilemma)
+    named_participants: list[str] = meta.get("participants", [])
+    logger.info("Start signal received. Dilemma: %s | Participants: %s", dilemma, named_participants)
 
     # All participants who joined during the waiting phase are already present
     participant = await ctx.wait_for_participant()
@@ -186,6 +187,24 @@ async def entrypoint(ctx: JobContext) -> None:
                 user_input=f"[Vibe-Check just said]: {text}"
             )
 
+    # ── Speaker tracking — updated via LiveKit data channel ─────────────────
+    current_speaker: list[str] = [""]  # mutable container for closure capture
+
+    @ctx.room.on("data_received")
+    def _on_data(data: rtc.DataPacket) -> None:
+        try:
+            msg = json.loads(data.data.decode())
+            if msg.get("type") == "speaker":
+                name = str(msg.get("name", "")).strip()
+                if name:
+                    current_speaker[0] = name
+                    logger.info("Speaker changed to: %s", name)
+                    optimizer_session.generate_reply(
+                        user_input=f"[{name} is now speaking — listen for their voice]"
+                    )
+        except Exception:
+            pass
+
     # ── Start both sessions — hear all room participants ─────────────────────
     asyncio.create_task(
         optimizer_session.start(
@@ -203,12 +222,20 @@ async def entrypoint(ctx: JobContext) -> None:
     # Give sessions a moment to connect before seeding the debate
     await asyncio.sleep(2.0)
 
+    # Build participant intro string for seeding
+    if named_participants:
+        people_str = ", ".join(named_participants)
+        participant_context = f"The people in the room are: {people_str}. They share one microphone and will tap their name before speaking so you know who it is."
+    else:
+        num_people = len(list(ctx.room.remote_participants.values()))
+        participant_context = f"There are {num_people} people sharing one microphone — they'll take turns speaking into it."
+
     # Seed Optimizer with the dilemma — Vibe-Check reacts via text bridge
     optimizer_session.generate_reply(
         user_input=(
             f"[SYSTEM]: The user's dilemma is: \"{dilemma}\". "
-            f"There are {len([p for p in ctx.room.remote_participants.values()])} people in the room sharing one microphone — they'll take turns speaking into it. "
-            "Welcome everyone and kick off the debate in one short sentence."
+            f"{participant_context} "
+            "Welcome everyone by name if you know them, and kick off the debate in one short sentence."
         )
     )
 

@@ -8,9 +8,10 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "LiveKit env vars not configured" }, { status: 500 });
   }
 
-  const { roomName, dilemma } = (await request.json()) as {
+  const { roomName, dilemma, participants = [] } = (await request.json()) as {
     roomName: string;
     dilemma: string;
+    participants?: string[];
   };
 
   if (!roomName) {
@@ -20,7 +21,7 @@ export async function POST(request: Request) {
   const roomSvc = new RoomServiceClient(LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET);
   await roomSvc.updateRoomMetadata(
     roomName,
-    JSON.stringify({ dilemma: dilemma ?? "", status: "started" }),
+    JSON.stringify({ dilemma: dilemma ?? "", status: "started", participants }),
   );
 
   return NextResponse.json({ ok: true });

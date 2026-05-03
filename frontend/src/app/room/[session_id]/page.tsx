@@ -115,7 +115,46 @@ function TranscriptPanel() {
 // Inner room UI — rendered inside <LiveKitRoom>
 // ---------------------------------------------------------------------------
 
-function RoomContent({ dilemma, onLeave }: { dilemma: string; onLeave: () => void }) {
+// ---------------------------------------------------------------------------
+// Speaker selector — N buttons, one per participant
+// ---------------------------------------------------------------------------
+
+function SpeakerSelector({ participants }: { participants: string[] }) {
+  const room = useRoomContext();
+  const [active, setActive] = useState<string | null>(null);
+
+  if (participants.length === 0) return null;
+
+  function selectSpeaker(name: string) {
+    setActive(name);
+    const payload = new TextEncoder().encode(JSON.stringify({ type: "speaker", name }));
+    room.localParticipant.publishData(payload, { reliable: true });
+  }
+
+  return (
+    <div className="flex w-full max-w-lg flex-col items-center gap-3">
+      <p className="text-xs uppercase tracking-widest text-white/30">Who&apos;s speaking?</p>
+      <div className="flex flex-wrap justify-center gap-2">
+        {participants.map((name) => (
+          <button
+            key={name}
+            type="button"
+            onClick={() => selectSpeaker(name)}
+            className={`rounded-full px-4 py-2 text-sm font-semibold transition ${
+              active === name
+                ? "bg-amber-400 text-black shadow-lg"
+                : "bg-white/10 text-white/70 hover:bg-white/20"
+            }`}
+          >
+            {name}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function RoomContent({ dilemma, participants, onLeave }: { dilemma: string; participants: string[]; onLeave: () => void }) {
   const { state, audioTrack } = useVoiceAssistant();
   const room = useRoomContext();
   const [speakerLabel, setSpeakerLabel] = useState("");
@@ -181,6 +220,9 @@ function RoomContent({ dilemma, onLeave }: { dilemma: string; onLeave: () => voi
         />
         <p className="text-sm text-white/50">{statusLabel[state] ?? state}</p>
       </div>
+
+      {/* Speaker selector — tap before speaking */}
+      <SpeakerSelector participants={participants} />
 
       {/* Live transcript */}
       <TranscriptPanel />
@@ -291,7 +333,7 @@ function AgentCard({
 
 const AGENT_IDENTITIES = new Set(["optimizer", "vibe-check"]);
 
-function WaitingRoom({ roomName, dilemma }: { roomName: string; dilemma: string }) {
+function WaitingRoom({ roomName, dilemma, participants }: { roomName: string; dilemma: string; participants: string[] }) {
   const room = useRoomContext();
   const allParticipants = useParticipants();
   const [starting, setStarting] = useState(false);
@@ -305,7 +347,7 @@ function WaitingRoom({ roomName, dilemma }: { roomName: string; dilemma: string 
       await fetch("/api/start", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ roomName, dilemma }),
+        body: JSON.stringify({ roomName, dilemma, participants }),
       });
     } catch {
       setStarting(false);
@@ -370,11 +412,13 @@ function RoomInner({
   roomName,
   dilemma,
   setDilemma,
+  participants,
   onLeave,
 }: {
   roomName: string;
   dilemma: string;
   setDilemma: (d: string) => void;
+  participants: string[];
   onLeave: () => void;
 }) {
   const room = useRoomContext();
@@ -395,8 +439,8 @@ function RoomInner({
     return () => void room.off("roomMetadataChanged", parseMeta);
   }, [room, setDilemma]);
 
-  if (!started) return <WaitingRoom roomName={roomName} dilemma={dilemma} />;
-  return <RoomContent dilemma={dilemma} onLeave={onLeave} />;
+  if (!started) return <WaitingRoom roomName={roomName} dilemma={dilemma} participants={participants} />;
+  return <RoomContent dilemma={dilemma} participants={participants} onLeave={onLeave} />;
 }
 
 // ---------------------------------------------------------------------------
@@ -412,6 +456,14 @@ export default function RoomPage() {
   const [dilemma, setDilemma] = useState("");
   const [error, setError] = useState("");
   const [copied, setCopied] = useState(false);
+  const [participants] = useState<string[]>(() => {
+    if (typeof window === "undefined") return [];
+    try {
+      return JSON.parse(sessionStorage.getItem(`lk-participants-${roomName}`) ?? "[]");
+    } catch {
+      return [];
+    }
+  });
 
   const shareUrl =
     typeof window !== "undefined" ? `${window.location.origin}/room/${roomName}` : "";
@@ -493,6 +545,7 @@ export default function RoomPage() {
           roomName={roomName}
           dilemma={dilemma}
           setDilemma={setDilemma}
+          participants={participants}
           onLeave={() => router.push("/")}
         />
       </LiveKitRoom>
