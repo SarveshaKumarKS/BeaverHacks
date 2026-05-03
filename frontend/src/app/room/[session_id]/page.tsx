@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
 import { useParams, useRouter } from "next/navigation";
 import {
   LiveKitRoom,
@@ -11,6 +11,7 @@ import {
   useRoomContext,
 } from "@livekit/components-react";
 import "@livekit/components-styles";
+import type { Participant, TranscriptionSegment } from "livekit-client";
 import { Copy, Radio } from "lucide-react";
 
 // ---------------------------------------------------------------------------
@@ -23,13 +24,103 @@ interface ConnectionDetails {
 }
 
 // ---------------------------------------------------------------------------
+// Transcript
+// ---------------------------------------------------------------------------
+
+interface TranscriptLine {
+  id: string;
+  speaker: string;
+  text: string;
+  final: boolean;
+}
+
+function speakerName(participant: Participant): string {
+  const id = participant.identity.toLowerCase();
+  if (id.includes("optimizer")) return "The Optimizer";
+  if (id.includes("vibe") || id.includes("check")) return "The Vibe-Check";
+  return "You";
+}
+
+function speakerColor(speaker: string): string {
+  if (speaker === "The Optimizer") return "text-amber-400";
+  if (speaker === "The Vibe-Check") return "text-fuchsia-400";
+  return "text-sky-400";
+}
+
+function useTranscript() {
+  const room = useRoomContext();
+  const [lines, setLines] = useState<TranscriptLine[]>([]);
+
+  useEffect(() => {
+    const onTranscription = (
+      segments: TranscriptionSegment[],
+      participant: Participant,
+    ) => {
+      const speaker = speakerName(participant);
+      setLines((prev) => {
+        const next = [...prev];
+        for (const seg of segments) {
+          const idx = next.findIndex((l) => l.id === seg.id);
+          if (idx >= 0) {
+            next[idx] = { ...next[idx], text: seg.text, final: seg.final };
+          } else {
+            next.push({ id: seg.id, speaker, text: seg.text, final: seg.final });
+          }
+        }
+        return next;
+      });
+    };
+
+    room.on("transcriptionReceived", onTranscription);
+    return () => void room.off("transcriptionReceived", onTranscription);
+  }, [room]);
+
+  return lines;
+}
+
+function TranscriptPanel() {
+  const lines = useTranscript();
+  const bottomRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [lines]);
+
+  if (lines.length === 0) return null;
+
+  return (
+    <div className="w-full max-w-lg rounded-xl border border-white/10 bg-white/5 p-4">
+      <p className="mb-2 text-xs uppercase tracking-widest text-white/30">Transcript</p>
+      <div className="flex max-h-52 flex-col gap-2 overflow-y-auto pr-1">
+        {lines.map((line) => (
+          <div key={line.id} className={`text-sm ${line.final ? "opacity-100" : "opacity-50"}`}>
+            <span className={`mr-2 font-semibold ${speakerColor(line.speaker)}`}>
+              {line.speaker}:
+            </span>
+            <span className="text-white/80">{line.text}</span>
+          </div>
+        ))}
+        <div ref={bottomRef} />
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Inner room UI — rendered inside <LiveKitRoom>
 // ---------------------------------------------------------------------------
 
-function RoomContent({ dilemma }: { dilemma: string }) {
+function RoomContent({ dilemma, setDilemma }: { dilemma: string; setDilemma: (d: string) => void }) {
   const { state, audioTrack } = useVoiceAssistant();
   const room = useRoomContext();
   const [speakerLabel, setSpeakerLabel] = useState("");
+
+  useEffect(() => {
+    if (room.metadata) setDilemma(room.metadata);
+    const onMetadata = () => { if (room.metadata) setDilemma(room.metadata); };
+    room.on("roomMetadataChanged", onMetadata);
+    return () => void room.off("roomMetadataChanged", onMetadata);
+  }, [room, setDilemma]);
 
   useEffect(() => {
     const onActiveChange = () => {
@@ -92,6 +183,9 @@ function RoomContent({ dilemma }: { dilemma: string }) {
         />
         <p className="text-sm text-white/50">{statusLabel[state] ?? state}</p>
       </div>
+
+      {/* Live transcript */}
+      <TranscriptPanel />
 
       {/* Mic / disconnect controls */}
       <VoiceAssistantControlBar controls={{ leave: true }} />
@@ -214,12 +308,9 @@ export default function RoomPage() {
         token={connectionDetails.token}
         audio={true}
         video={false}
-        onConnected={(room) => {
-          if (room.metadata) setDilemma(room.metadata);
-        }}
         onDisconnected={() => router.push("/")}
       >
-        <RoomContent dilemma={dilemma} />
+        <RoomContent dilemma={dilemma} setDilemma={setDilemma} />
       </LiveKitRoom>
     </main>
   );

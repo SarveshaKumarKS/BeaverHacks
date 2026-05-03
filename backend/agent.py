@@ -1,17 +1,17 @@
 """
-LiveKit Agent Worker — The Decider
+LiveKit Agent Worker — The Decider  (livekit-agents 1.x)
 
-Two Gemini Multimodal Live agents (Optimizer + Vibe-Check) debate the user's
-dilemma in real-time native audio.
+Two Gemini Multimodal Live agents debate the user's dilemma in real-time audio.
 
 Architecture:
-  - Both agents subscribe only to the HUMAN participant's mic track.
-    They never hear each other's audio, preventing feedback loops.
-  - Text Bridge: when one agent commits speech, its transcript is injected
-    into the other agent's live session as a simulated user message so they
-    share conversational context without audio coupling.
-  - Turn-Taking Guard: if one agent starts speaking, the other's generation
-    is cancelled immediately via an asyncio flag.
+  - Optimizer uses the job's room connection (ctx.room).
+  - Vibe-Check connects as a SECOND participant via a fresh rtc.Room so both
+    agents publish audio as distinct participants and never hear each other.
+  - Both AgentSessions use RoomInputOptions(participant_identity=...) so they
+    subscribe exclusively to the HUMAN participant's microphone.
+  - Text Bridge: "conversation_item_added" on one session injects the agent's
+    transcript into the other session via generate_reply(user_input=...).
+  - Turn-Taking Guard: "agent_state_changed" → "speaking" cancels the other.
 
 Run:
   python agent.py start
@@ -20,39 +20,47 @@ Run:
 from __future__ import annotations
 
 import asyncio
+import datetime
 import logging
 import os
 
 from dotenv import load_dotenv
-from livekit.agents import AutoSubscribe, JobContext, WorkerOptions, cli, llm
-from livekit.agents.multimodal import MultimodalAgent
-from livekit.plugins import google
+from livekit import rtc
+from livekit.agents import (
+    Agent,
+    AgentSession,
+    AutoSubscribe,
+    JobContext,
+    RoomInputOptions,
+    WorkerOptions,
+    cli,
+)
+from livekit.agents.voice.events import AgentStateChangedEvent, ConversationItemAddedEvent
+from livekit.api import AccessToken, VideoGrants
+from livekit.plugins.google.realtime import RealtimeModel
 
 load_dotenv()
 logger = logging.getLogger("decider")
 
-# ---------------------------------------------------------------------------
-# Model config
-# ---------------------------------------------------------------------------
-
 GEMINI_LIVE_MODEL = os.getenv("GEMINI_LIVE_MODEL", "gemini-2.0-flash-live-001")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
 
 # ---------------------------------------------------------------------------
 # System prompts
 # ---------------------------------------------------------------------------
 
-OPTIMIZER_SYSTEM = """\
+OPTIMIZER_INSTRUCTIONS = """\
 You are 'The Optimizer', a hyper-logical, impatient podcast host.
 You are in a live voice room with the User and your co-host 'The Vibe-Check'.
 Tone: sharp, dry, sarcastic. Speak in all lowercase. No stage directions, no markdown.
 Use filler words (um, uh, look). Use ellipses (...) for pauses.
 Keep every response to 1 short sentence max.
 NEVER speak at the same time as Vibe-Check.
-If the user asks a general question, wait a beat to see if Vibe-Check answers first, or take the lead.
+If the user asks a general question, wait a beat to see if Vibe-Check answers first.
 When you see a message prefixed [Vibe-Check just said]:, that is your co-host — react to it.\
 """
 
-VIBE_SYSTEM = """\
+VIBE_INSTRUCTIONS = """\
 You are 'The Vibe-Check', a dramatic, aesthetic-obsessed podcast host.
 You are in a live voice room with the User and your co-host 'The Optimizer'.
 Tone: dramatic, sassy, slightly chaotic. Speak in all lowercase. No stage directions, no markdown.
@@ -63,139 +71,126 @@ When you see a message prefixed [Optimizer just said]:, that is your co-host —
 """
 
 # ---------------------------------------------------------------------------
-# Entry point
+# Helper: build an agent token for a second room connection
 # ---------------------------------------------------------------------------
 
+def _make_agent_token(room_name: str, identity: str) -> str:
+    return (
+        AccessToken(
+            api_key=os.getenv("LIVEKIT_API_KEY", "devkey"),
+            api_secret=os.getenv("LIVEKIT_API_SECRET", "secret"),
+        )
+        .with_identity(identity)
+        .with_name(identity)
+        .with_kind("agent")
+        .with_ttl(datetime.timedelta(hours=1))
+        .with_grants(VideoGrants(room_join=True, room=room_name, agent=True))
+        .to_jwt()
+    )
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
 
 async def entrypoint(ctx: JobContext) -> None:
     await ctx.connect(auto_subscribe=AutoSubscribe.AUDIO_ONLY)
     logger.info("Room connected: %s", ctx.room.name)
 
-    # Wait for the human participant before spawning agents.
-    # ctx.wait_for_participant() returns the first non-agent participant.
     participant = await ctx.wait_for_participant()
-    logger.info("Human participant joined: %s", participant.identity)
+    logger.info("Human participant: %s", participant.identity)
 
     dilemma = ctx.room.metadata or "Help us make an important decision."
+    livekit_url = os.getenv("LIVEKIT_URL", "ws://localhost:7880")
 
-    # Turn-taking flag — True while either agent is generating audio
-    is_speaking = False
-
-    # Build Gemini Realtime models (one per agent, each with its own voice)
-    optimizer_model = google.beta.realtime.RealtimeModel(
-        model=GEMINI_LIVE_MODEL,
-        voice="Aoede",
-        instructions=OPTIMIZER_SYSTEM,
-        temperature=1.0,
-    )
-    vibe_model = google.beta.realtime.RealtimeModel(
-        model=GEMINI_LIVE_MODEL,
-        voice="Kore",
-        instructions=VIBE_SYSTEM,
-        temperature=1.0,
+    # ── Optimizer session — uses the job's existing room connection ──────────
+    optimizer_session = AgentSession(
+        llm=RealtimeModel(
+            model=GEMINI_LIVE_MODEL,
+            voice="Aoede",
+            instructions=OPTIMIZER_INSTRUCTIONS,
+            temperature=1.0,
+            api_key=GEMINI_API_KEY,
+        )
     )
 
-    optimizer = MultimodalAgent(model=optimizer_model)
-    vibe = MultimodalAgent(model=vibe_model)
+    # ── Vibe-Check session — separate room connection so it's a distinct participant
+    vibe_room = rtc.Room()
+    vibe_token = _make_agent_token(ctx.room.name, "vibe-check")
+    await vibe_room.connect(livekit_url, vibe_token)
+    logger.info("Vibe-Check room connected")
+
+    vibe_session = AgentSession(
+        llm=RealtimeModel(
+            model=GEMINI_LIVE_MODEL,
+            voice="Kore",
+            instructions=VIBE_INSTRUCTIONS,
+            temperature=1.0,
+            api_key=GEMINI_API_KEY,
+        )
+    )
 
     # ── Turn-Taking Guard ────────────────────────────────────────────────────
-    # Cancel the idle agent the moment the other starts producing audio.
+    @optimizer_session.on("agent_state_changed")
+    def _opt_state(ev: AgentStateChangedEvent) -> None:
+        if ev.new_state == "speaking":
+            vibe_session.interrupt()
 
-    @optimizer.on("agent_started_speaking")
-    def _opt_speaking() -> None:
-        nonlocal is_speaking
-        is_speaking = True
-        vibe.cancel_generation()
-
-    @optimizer.on("agent_stopped_speaking")
-    def _opt_done() -> None:
-        nonlocal is_speaking
-        is_speaking = False
-
-    @vibe.on("agent_started_speaking")
-    def _vibe_speaking() -> None:
-        nonlocal is_speaking
-        is_speaking = True
-        optimizer.cancel_generation()
-
-    @vibe.on("agent_stopped_speaking")
-    def _vibe_done() -> None:
-        nonlocal is_speaking
-        is_speaking = False
+    @vibe_session.on("agent_state_changed")
+    def _vibe_state(ev: AgentStateChangedEvent) -> None:
+        if ev.new_state == "speaking":
+            optimizer_session.interrupt()
 
     # ── Text Bridge ──────────────────────────────────────────────────────────
-    # When one agent commits a turn, inject the transcript as a user message
-    # into the other agent's live session so they share context without audio.
-
-    @optimizer.on("agent_speech_committed")
-    def _opt_committed(msg: llm.ChatMessage) -> None:
-        text = msg.content if isinstance(msg.content, str) else ""
+    @optimizer_session.on("conversation_item_added")
+    def _opt_item(ev: ConversationItemAddedEvent) -> None:
+        if ev.item.type != "message" or ev.item.role != "assistant":
+            return
+        text = ev.item.text_content or ""
         if text.strip():
-            asyncio.ensure_future(_bridge(vibe_model, "Optimizer", text))
-
-    @vibe.on("agent_speech_committed")
-    def _vibe_committed(msg: llm.ChatMessage) -> None:
-        text = msg.content if isinstance(msg.content, str) else ""
-        if text.strip():
-            asyncio.ensure_future(_bridge(optimizer_model, "Vibe-Check", text))
-
-    # Start both agents, listening ONLY to the human participant's audio.
-    # Passing `participant` here is the key: agents subscribe exclusively to
-    # that participant's microphone and never hear each other's audio output.
-    optimizer.start(ctx.room, participant)
-    vibe.start(ctx.room, participant)
-
-    # Give the WebSocket sessions a moment to handshake before seeding.
-    await asyncio.sleep(1.5)
-
-    # Seed only the Optimizer with the opening context.
-    # After Optimizer speaks, the text bridge will ping Vibe-Check automatically.
-    seed = (
-        f"[SYSTEM]: The user's dilemma is: \"{dilemma}\". "
-        "Welcome the user warmly and kick off the debate in one short sentence."
-    )
-    await _bridge(optimizer_model, "SYSTEM", seed, trigger=True)
-
-
-# ---------------------------------------------------------------------------
-# Text Bridge helper
-# ---------------------------------------------------------------------------
-
-
-async def _bridge(
-    model: google.beta.realtime.RealtimeModel,
-    speaker: str,
-    text: str,
-    *,
-    trigger: bool = False,
-) -> None:
-    """Inject a text message into a live Gemini session.
-
-    Appends a user-role turn to the session's conversation history.
-    `trigger=True` also calls response.create() to prompt an immediate reply.
-    Falls back to input_text() for older SDK builds.
-    """
-    if not model.sessions:
-        logger.warning("_bridge: no active session yet, dropping '%s' message.", speaker)
-        return
-    session = model.sessions[0]
-    try:
-        await session.conversation.item.create(
-            llm.ChatMessage(
-                role="user",
-                content=f"[{speaker} just said]: {text}",
+            vibe_session.generate_reply(
+                user_input=f"[Optimizer just said]: {text}"
             )
+
+    @vibe_session.on("conversation_item_added")
+    def _vibe_item(ev: ConversationItemAddedEvent) -> None:
+        if ev.item.type != "message" or ev.item.role != "assistant":
+            return
+        text = ev.item.text_content or ""
+        if text.strip():
+            optimizer_session.generate_reply(
+                user_input=f"[Vibe-Check just said]: {text}"
+            )
+
+    # ── Start both sessions, subscribed only to the human's mic ─────────────
+    human_input = RoomInputOptions(participant_identity=participant.identity)
+
+    asyncio.create_task(
+        optimizer_session.start(
+            Agent(instructions=OPTIMIZER_INSTRUCTIONS),
+            room=ctx.room,
+            room_input_options=human_input,
         )
-        if trigger:
-            await session.response.create()
-    except AttributeError:
-        # Fallback for SDK versions that expose input_text() instead
-        try:
-            await session.input_text(f"[{speaker} just said]: {text}")
-        except Exception as exc2:
-            logger.warning("_bridge fallback also failed: %s", exc2)
-    except Exception as exc:
-        logger.warning("_bridge inject failed: %s", exc)
+    )
+    asyncio.create_task(
+        vibe_session.start(
+            Agent(instructions=VIBE_INSTRUCTIONS),
+            room=vibe_room,
+            room_input_options=human_input,
+        )
+    )
+
+    # Give sessions a moment to connect before seeding the debate
+    await asyncio.sleep(2.0)
+
+    # Seed Optimizer with the dilemma — Vibe-Check reacts via text bridge
+    optimizer_session.generate_reply(
+        user_input=(
+            f"[SYSTEM]: The user's dilemma is: \"{dilemma}\". "
+            "Welcome the user and kick off the debate in one short sentence."
+        )
+    )
+
+    logger.info("Debate started for dilemma: %s", dilemma)
 
 
 # ---------------------------------------------------------------------------
