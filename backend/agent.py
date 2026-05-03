@@ -123,10 +123,27 @@ Never explain yourself. Output only the JSON.\
 """
 
 # ---------------------------------------------------------------------------
-# Helper: safe generate_reply (swallows errors during Gemini session reconnects)
+# Helper: safe generate_reply with strict alternation enforcement
 # ---------------------------------------------------------------------------
 
-def _safe_reply(session: AgentSession, text: str) -> None:
+# Module-level alternation state (set during entrypoint, referenced by _safe_reply)
+_last_spoke:       list[str]  = [""]   # "optimizer" | "vibe" | ""
+_last_question_t:  list[float] = [0.0] # monotonic time of last question sent to user
+_optimizer_ref:    list       = [None]
+_vibe_ref:         list       = [None]
+
+QUESTION_COOLDOWN = 25.0  # seconds before another direct question is allowed
+
+def _safe_reply(session, text: str, force: bool = False) -> None:
+    """Send a reply to a session.
+
+    Enforces strict alternation: the same agent cannot speak twice in a row
+    unless force=True (used for watchdog / end-of-debate signals).
+    """
+    who = "optimizer" if session is _optimizer_ref[0] else "vibe"
+    if not force and _last_spoke[0] == who:
+        logger.debug("_safe_reply blocked — %s already spoke last, waiting for other agent", who)
+        return
     try:
         session.generate_reply(user_input=text)
     except Exception as exc:
@@ -296,6 +313,10 @@ async def orchestrator_loop(
         action = decision.get("action", "continue")
         logger.info("Orchestrator → %s", decision)
 
+        # Route to whoever didn't speak last so alternation is respected
+        first_session  = vibe_session      if _last_spoke[0] == "optimizer" else optimizer_session
+        second_session = optimizer_session if _last_spoke[0] == "optimizer" else vibe_session
+
         if action == "inject_search" and not search_injected and search_results:
             # Build result text directly from raw Tavily results to preserve place names
             raw_text = "; ".join(
@@ -305,28 +326,32 @@ async def orchestrator_loop(
             )
             result_text = raw_text or decision.get("result", "")
             _safe_reply(
-                optimizer_session,
+                first_session,
                 f"state at least two specific names, facts, or details from this out loud right now (no paraphrasing), "
-                f"then ask the humans if any of it changes their thinking: {result_text}",
+                f"then react to what it means for the debate — don't ask a question: {result_text}",
             )
             search_injected = True
 
         elif action == "ask_user":
-            question = decision.get("question", "ask the users what they actually think")
-            _safe_reply(optimizer_session, f"stop debating — ask the humans this exact question out loud right now: \"{question}\"")
-            await asyncio.sleep(3)
-            _safe_reply(vibe_session, f"if optimizer didn't ask yet, you ask the humans: \"{question}\"")
+            now = time.monotonic()
+            if now - _last_question_t[0] < QUESTION_COOLDOWN:
+                logger.debug("Suppressing ask_user — question cooldown active")
+            else:
+                question = decision.get("question", "ask the users what they actually think")
+                _safe_reply(first_session, f"stop debating for a second — ask the humans this exact question: \"{question}\"")
+                _last_question_t[0] = now
 
         elif action == "push_consensus":
             angle = decision.get("angle", "start driving toward a final answer")
-            _safe_reply(optimizer_session, f"ok wrap it up — {angle}")
-            await asyncio.sleep(3)
-            _safe_reply(vibe_session, f"add your dramatic take — {angle}")
+            _safe_reply(first_session, f"ok wrap it up — {angle}")
+            await asyncio.sleep(4)
+            _safe_reply(second_session, f"add your take — {angle}")
 
         elif action == "end_debate":
             verdict = decision.get("verdict", "the debate has concluded")
-            _safe_reply(optimizer_session, f"final verdict time — {verdict}")
-            _safe_reply(vibe_session, "react to the optimizer's verdict and sign off in one dramatic sentence")
+            _safe_reply(optimizer_session, f"final verdict time — {verdict}", force=True)
+            await asyncio.sleep(2)
+            _safe_reply(vibe_session, "react to the optimizer's verdict and sign off in one dramatic sentence", force=True)
             debate_ended[0] = True
             break
 
@@ -372,6 +397,10 @@ async def entrypoint(ctx: JobContext) -> None:
     last_vibe_text:   list[str]   = [""]   # last text bridged FROM vibe (echo detection)
     last_vibe_turn:   list[int]   = [0]    # turn_count when vibe last spoke (watchdog)
 
+    # Alternation + question-cooldown state (module-level refs set here for _safe_reply)
+    _last_spoke[0]      = ""
+    _last_question_t[0] = 0.0
+
     # ── Optimizer session ────────────────────────────────────────────────────
     optimizer_room  = rtc.Room()
     optimizer_token = _make_agent_token(ctx.room.name, "optimizer")
@@ -400,6 +429,10 @@ async def entrypoint(ctx: JobContext) -> None:
         )
     )
 
+    # Wire module-level session refs so _safe_reply can identify which session is which
+    _optimizer_ref[0] = optimizer_session
+    _vibe_ref[0]      = vibe_session
+
     # ── Turn-Taking Guard + State Tracking ──────────────────────────────────
     optimizer_state: list[str] = ["idle"]
     vibe_state:      list[str] = ["idle"]
@@ -426,6 +459,7 @@ async def entrypoint(ctx: JobContext) -> None:
             return
         if ev.item.role == "assistant":
             turn_count[0] += 1
+            _last_spoke[0] = "optimizer"
             transcript_buffer.append(f"Optimizer: {text}")
             now = time.monotonic()
             if (
@@ -460,6 +494,7 @@ async def entrypoint(ctx: JobContext) -> None:
             return
         if ev.item.role == "assistant":
             turn_count[0] += 1
+            _last_spoke[0] = "vibe"
             transcript_buffer.append(f"Vibe-Check: {text}")
             last_vibe_turn[0] = turn_count[0]
             now = time.monotonic()
@@ -487,8 +522,9 @@ async def entrypoint(ctx: JobContext) -> None:
             current_speaker[0] = name
             if name:
                 logger.info("Speaker → %s", name)
-                _safe_reply(optimizer_session, f"{name} is speaking now")
-                _safe_reply(vibe_session, f"{name} is speaking now")
+                # Only notify whoever didn't speak last so we don't double-prompt
+                target = vibe_session if _last_spoke[0] == "optimizer" else optimizer_session
+                _safe_reply(target, f"{name} is speaking now")
 
         elif msg.get("type") == "consensus":
             if debate_ended[0]:
@@ -498,6 +534,7 @@ async def entrypoint(ctx: JobContext) -> None:
             _safe_reply(
                 optimizer_session,
                 "the group just agreed — deliver your final one-sentence verdict in the funniest, most dramatic way possible and sign off",
+                force=True,
             )
             # delay vibe's cue so optimizer finishes speaking before vibe reacts,
             # then interrupt both sessions so they go fully silent
@@ -506,6 +543,7 @@ async def entrypoint(ctx: JobContext) -> None:
                 _safe_reply(
                     vibe_session,
                     "react to the optimizer's verdict with maximum drama in one sentence, then sign off in the most extra way possible",
+                    force=True,
                 )
                 await asyncio.sleep(10)
                 try:
@@ -538,12 +576,27 @@ async def entrypoint(ctx: JobContext) -> None:
 
     location_line = f"Current context: {location_ctx}. " if location_ctx else ""
 
-    _safe_reply(
-        optimizer_session,
-        f"the dilemma is: \"{dilemma}\". {location_line}{participant_context} "
-        "welcome everyone by name if you know them, reference the time or place if relevant, "
-        "then immediately pick ONE option from the dilemma and argue for it in one sharp sentence.",
-    )
+    async def _opening_sequence() -> None:
+        # Optimizer goes first: welcome, pick a side, predict what the humans will choose
+        _safe_reply(
+            optimizer_session,
+            f"the dilemma is: \"{dilemma}\". {location_line}{participant_context} "
+            "welcome everyone by name if you know them, reference the time or place if relevant, "
+            "immediately pick ONE option and argue for it in one sharp sentence, "
+            "then make a bold prediction: out loud, say which option you think THESE specific humans will pick and why.",
+            force=True,
+        )
+        await asyncio.sleep(5)
+        if not debate_ended[0]:
+            # Vibe-Check fires back: take the opposite side AND challenge Optimizer's prediction
+            _safe_reply(
+                vibe_session,
+                "take the OPPOSITE side from whatever Optimizer just argued — defend it dramatically in one sentence, "
+                "then counter Optimizer's prediction: say which option YOU think the humans will actually choose and why Optimizer is totally wrong.",
+                force=True,
+            )
+
+    asyncio.create_task(_opening_sequence())
 
     logger.info("Debate started. Launching background tasks.")
 
@@ -554,7 +607,7 @@ async def entrypoint(ctx: JobContext) -> None:
         nonlocal search_results
         search_results = await _run_web_search(dilemma, location_ctx or "")
 
-        # Auto-inject search results as soon as they arrive — don't wait for orchestrator
+        # Auto-inject search results as soon as they arrive — route to whoever didn't speak last
         if search_results and not debate_ended[0]:
             raw_text = "; ".join(
                 f"{r.get('title', '')}: {r.get('content', '')[:150]}"
@@ -562,11 +615,11 @@ async def entrypoint(ctx: JobContext) -> None:
                 if r.get("title")
             )
             if raw_text:
+                target = vibe_session if _last_spoke[0] == "optimizer" else optimizer_session
                 _safe_reply(
-                    optimizer_session,
-                    f"here are specific results from a web search relevant to the dilemma — "
-                    f"state at least two specific names, facts, or details from this out loud right now (no paraphrasing), "
-                    f"then ask the humans if any of it changes their thinking: {raw_text}",
+                    target,
+                    f"here are specific results from a web search — "
+                    f"state at least two specific names or facts from this out loud right now (no paraphrasing): {raw_text}",
                 )
                 logger.info("Auto-injected search results into debate")
 
@@ -582,20 +635,27 @@ async def entrypoint(ctx: JobContext) -> None:
         )
 
     async def _nudge_convergence() -> None:
-        """Fire when a human states a clear preference — push both agents to stop debating."""
+        """Fire when a human states a clear preference — push both agents to wrap up."""
         await asyncio.sleep(1)
         if not debate_ended[0]:
-            _safe_reply(optimizer_session, "a human just clearly stated their preference — stop arguing, acknowledge their choice in one sentence, then ask one short follow-up to finalize")
+            # Send to whoever DIDN'T speak last so alternation holds
+            first  = vibe_session      if _last_spoke[0] == "optimizer" else optimizer_session
+            second = optimizer_session if _last_spoke[0] == "optimizer" else vibe_session
+            _safe_reply(first, "a human just clearly stated their preference — acknowledge it in one sentence, no more questions")
             await asyncio.sleep(3)
             if not debate_ended[0]:
-                _safe_reply(vibe_session, "the human has spoken — react to their choice dramatically in one sentence and ask one follow-up to lock it in")
+                _safe_reply(second, "the human has spoken — react dramatically in one sentence, then zip it")
 
     async def _vibe_watchdog() -> None:
         """Wake up Vibe-Check if it has been silent while Optimizer monopolizes."""
         while not debate_ended[0]:
             await asyncio.sleep(20)
             if not debate_ended[0] and turn_count[0] - last_vibe_turn[0] > 4:
-                _safe_reply(vibe_session, "vibe-check, you've been quiet for too long — jump in right now with your hottest take on what was just said")
+                _safe_reply(
+                    vibe_session,
+                    "vibe-check, you've been quiet for too long — jump in right now with your hottest take on what was just said",
+                    force=True,
+                )
                 last_vibe_turn[0] = turn_count[0]
 
     asyncio.create_task(_vibe_watchdog())
