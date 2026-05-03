@@ -248,12 +248,12 @@ async def orchestrator_loop(
 
         if action == "inject_search" and not search_injected and search_results:
             result_text = decision.get("result", search_summary[:400])
-            _safe_reply(optimizer_session, f"hey, just found this — {result_text}")
+            _safe_reply(optimizer_session, f"just looked it up — name a specific place or fact from this in your next sentence: {result_text}")
             search_injected = True
 
         elif action == "ask_user":
             question = decision.get("question", "ask the users what they actually think")
-            _safe_reply(optimizer_session, f"ask the people here: {question}")
+            _safe_reply(optimizer_session, f"stop debating for a sec and ask them this exact question out loud: \"{question}\"")
 
         elif action == "push_consensus":
             angle = decision.get("angle", "start driving toward a final answer")
