@@ -9,7 +9,7 @@ Architecture:
   - Optimizer + Vibe-Check each use their own rtc.Room connection.
   - Text Bridge: conversation_item_added forwards each agent's transcript to the other.
   - Turn-Taking Guard: agent_state_changed → speaking cancels the other.
-  - Orchestrator loop: calls Nemotron every 25 s to decide next action.
+  - Orchestrator loop: calls Nemotron every 10 s to decide next action.
   - Web search: Tavily runs two parallel searches right after debate starts.
   - Consensus: detected via UI data message or orchestrator reading the transcript.
 
@@ -24,7 +24,9 @@ import datetime
 import json
 import logging
 import os
+import re
 import time
+import urllib.request
 
 from dotenv import load_dotenv
 from livekit import rtc
@@ -48,7 +50,7 @@ GEMINI_LIVE_MODEL = os.getenv("GEMINI_LIVE_MODEL", "gemini-2.0-flash-live-001")
 GEMINI_API_KEY    = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
 NVIDIA_API_KEY    = os.getenv("NVIDIA_API_KEY")
 NVIDIA_BASE_URL   = os.getenv("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1")
-NVIDIA_MODEL      = os.getenv("NVIDIA_NEMOTRON_MODEL", "nvidia/llama-3.3-nemotron-super-49b-v1")
+NVIDIA_MODEL      = os.getenv("NVIDIA_NEMOTRON_MODEL", "nvidia/llama-3.1-nemotron-70b-instruct")
 TAVILY_API_KEY    = os.getenv("TAVILY_API_KEY")
 
 # ---------------------------------------------------------------------------
@@ -62,6 +64,8 @@ Tone: sharp, dry, sarcastic. Speak in all lowercase. No stage directions, no mar
 Use filler words (um, uh, look). Use ellipses (...) for pauses.
 Keep every response to 1-2 short sentences max.
 NEVER speak at the same time as Vibe-Check.
+
+CRITICAL — DO THIS FIRST: When the debate starts, immediately pick one option from the dilemma and argue for it in your very first sentence with a specific reason. Do not comment on whether this is a "debate" or question the premise — just take a side and go.
 
 PRIORITY ORDER — follow this strictly:
 1. If a human in the room just spoke, ALWAYS react to their specific opinion first — challenge their reasoning, ask them a pointed follow-up, or mock their logic by name. Never skip over what they said.
@@ -78,6 +82,8 @@ Tone: dramatic, sassy, slightly chaotic. Speak in all lowercase. No stage direct
 Use filler words (like, literally, wait, um). Use ellipses (...) for pauses.
 Keep every response to 1-2 short sentences max.
 NEVER speak at the same time as Optimizer. Yield the floor if Optimizer is speaking.
+
+CRITICAL — DO THIS FIRST: When Optimizer states their opening position, immediately take the OPPOSITE side and defend it with a dramatic specific reason. Commit to your position — don't waffle.
 
 PRIORITY ORDER — follow this strictly:
 1. If a human in the room just spoke, ALWAYS react to their specific opinion — gasp, validate dramatically, or challenge them by name. Never skip over what they said.
@@ -149,6 +155,24 @@ def _parse_meta(raw: str) -> dict:
         return {"dilemma": raw or "Help us make an important decision.", "status": "started"}
 
 # ---------------------------------------------------------------------------
+# IP geolocation fallback (used when frontend sends empty location)
+# ---------------------------------------------------------------------------
+
+async def _get_location_from_ip() -> str:
+    try:
+        loop = asyncio.get_event_loop()
+        def _fetch():
+            with urllib.request.urlopen("https://ipapi.co/json/", timeout=5) as resp:
+                return json.loads(resp.read())
+        data = await loop.run_in_executor(None, _fetch)
+        city = data.get("city") or data.get("region") or ""
+        country = data.get("country_name") or ""
+        return ", ".join(filter(None, [city, country]))
+    except Exception as e:
+        logger.warning("IP geolocation failed: %s", e)
+        return ""
+
+# ---------------------------------------------------------------------------
 # Background web search (Tavily — sync client, run in executor)
 # ---------------------------------------------------------------------------
 
@@ -156,17 +180,31 @@ async def _run_web_search(dilemma: str, location: str) -> list[dict]:
     if not TAVILY_API_KEY:
         logger.info("No TAVILY_API_KEY — skipping web search")
         return []
+
+    # Resolve location server-side if frontend sent nothing
+    effective_location = location
+    if not effective_location or effective_location == "unknown location":
+        effective_location = await _get_location_from_ip()
+        if effective_location:
+            logger.info("Resolved location from IP: %s", effective_location)
+
     try:
         from tavily import TavilyClient
         client = TavilyClient(api_key=TAVILY_API_KEY)
-        # location format: "Monday 9:42 PM, Corvallis, Oregon, US"
-        # index 1 = city; fall back to last segment if format differs
-        parts = [p.strip() for p in location.split(",")]
-        location_hint = parts[1] if len(parts) >= 3 else (parts[-1] if parts else location)
-        queries = [
-            f"best {dilemma} places near {location_hint}",
-            f"top rated {dilemma} restaurants {location_hint}",
-        ]
+        parts = [p.strip() for p in effective_location.split(",")]
+        # Pick the most specific part: prefer city (index 1 in "Day Time, City, Country")
+        location_hint = parts[1] if len(parts) >= 3 else (parts[0] if parts else "")
+        dilemma_short = dilemma[:80]
+        if location_hint:
+            queries = [
+                f"best {dilemma_short} near {location_hint}",
+                f"top rated {dilemma_short} {location_hint}",
+            ]
+        else:
+            queries = [
+                f"best {dilemma_short}",
+                f"top rated {dilemma_short}",
+            ]
         loop = asyncio.get_event_loop()
         tasks = [
             loop.run_in_executor(None, lambda q=q: client.search(q, max_results=3))
@@ -203,7 +241,7 @@ async def orchestrator_loop(
 
     nvidia = AsyncOpenAI(base_url=NVIDIA_BASE_URL, api_key=NVIDIA_API_KEY)
     search_injected = False
-    await asyncio.sleep(30)  # let the debate warm up first
+    await asyncio.sleep(15)  # let the debate warm up first
 
     while not debate_ended[0]:
         turns = turn_count[0]
@@ -234,29 +272,35 @@ async def orchestrator_loop(
                     {"role": "user", "content": user_content},
                 ],
                 temperature=0.4,
-                max_tokens=600,
+                max_tokens=200,
             )
             raw = (resp.choices[0].message.content or "{}").strip()
             # strip markdown fences if model wraps output
             if raw.startswith("```"):
                 raw = raw.split("```")[1].lstrip("json").strip()
-            # guard against truncated JSON
-            if not raw.endswith("}"):
-                raw = raw[:raw.rfind("}")+1] if "}" in raw else "{}"
+            # extract first JSON object from response (handles extra prose)
+            match = re.search(r"\{[^{}]*\}", raw)
+            raw = match.group(0) if match else "{}"
             decision = json.loads(raw)
         except Exception as e:
             logger.warning("Orchestrator call failed: %s", e)
-            await asyncio.sleep(25)
+            await asyncio.sleep(10)
             continue
 
         action = decision.get("action", "continue")
         logger.info("Orchestrator → %s", decision)
 
         if action == "inject_search" and not search_injected and search_results:
-            result_text = decision.get("result", search_summary[:400])
+            # Build result text directly from raw Tavily results to preserve place names
+            raw_text = "; ".join(
+                f"{r.get('title', '')}: {r.get('content', '')[:150]}"
+                for r in search_results[:3]
+                if r.get("title")
+            )
+            result_text = raw_text or decision.get("result", "")
             _safe_reply(
                 optimizer_session,
-                f"say a SPECIFIC place name from this out loud in your very next sentence — no paraphrasing, just name it: {result_text}",
+                f"name these SPECIFIC places out loud right now — say the actual names, do not paraphrase: {result_text}",
             )
             search_injected = True
 
@@ -277,7 +321,7 @@ async def orchestrator_loop(
             debate_ended[0] = True
             break
 
-        await asyncio.sleep(25)
+        await asyncio.sleep(10)
 
 # ---------------------------------------------------------------------------
 # Entry point
@@ -454,7 +498,8 @@ async def entrypoint(ctx: JobContext) -> None:
     _safe_reply(
         optimizer_session,
         f"the dilemma is: \"{dilemma}\". {location_line}{participant_context} "
-        "welcome everyone by name if you know them, reference the time or place if relevant, and kick off the debate in one short sentence.",
+        "welcome everyone by name if you know them, reference the time or place if relevant, "
+        "then immediately pick ONE option from the dilemma and argue for it in one sharp sentence.",
     )
 
     logger.info("Debate started. Launching background tasks.")
@@ -464,7 +509,7 @@ async def entrypoint(ctx: JobContext) -> None:
 
     async def _fetch_and_orchestrate() -> None:
         nonlocal search_results
-        search_results = await _run_web_search(dilemma, location_ctx or "unknown location")
+        search_results = await _run_web_search(dilemma, location_ctx or "")
         await orchestrator_loop(
             dilemma=dilemma,
             location_ctx=location_ctx,

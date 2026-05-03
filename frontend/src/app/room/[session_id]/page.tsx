@@ -426,10 +426,10 @@ function WaitingRoom({ roomName, dilemma, participants, locationCtx }: { roomNam
         <button
           type="button"
           onClick={startDebate}
-          disabled={starting}
+          disabled={starting || !locationCtx}
           className="flex items-center gap-2 rounded-md bg-amber-400 px-8 py-4 text-lg font-semibold text-black transition hover:bg-amber-300 disabled:opacity-50"
         >
-          {starting ? "Starting…" : "Start Debate"}
+          {starting ? "Starting…" : !locationCtx ? "Getting location…" : "Start Debate"}
           <ArrowRight size={20} />
         </button>
       ) : (
@@ -498,7 +498,10 @@ export default function RoomPage() {
   });
   const [error, setError] = useState("");
   const [copied, setCopied] = useState(false);
-  const [locationCtx, setLocationCtx] = useState("");
+  const [locationCtx, setLocationCtx] = useState<string>(() => {
+    if (typeof window === "undefined") return "";
+    return sessionStorage.getItem(`lk-location-${roomName}`) ?? "";
+  });
   const [participants] = useState<string[]>(() => {
     if (typeof window === "undefined") return [];
     try {
@@ -536,6 +539,9 @@ export default function RoomPage() {
   }, [roomName]);
 
   useEffect(() => {
+    // Host already has location from landing page (sessionStorage) — skip for guests only
+    if (locationCtx) return;
+
     const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
     const localTime = new Date().toLocaleString("en-US", {
       timeZone: timezone,

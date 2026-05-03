@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useState } from "react";
 import Image from "next/image";
 import { useRouter } from "next/navigation";
 import QRCode from "qrcode";
@@ -12,6 +12,60 @@ export default function HostLobby() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [copied, setCopied] = useState(false);
+
+  // Resolved as early as possible so it's ready before the host clicks Start Debate
+  const [locationCtx, setLocationCtx] = useState("");
+
+  useEffect(() => {
+    const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    const localTime = new Date().toLocaleString("en-US", {
+      timeZone: timezone,
+      weekday: "long",
+      hour: "numeric",
+      minute: "numeric",
+      hour12: true,
+    });
+
+    async function resolveFromIP() {
+      try {
+        const res = await fetch("https://ipapi.co/json/");
+        const data = await res.json();
+        const city = data.city || data.region || "Unknown city";
+        const country = data.country_name || "";
+        setLocationCtx(`${localTime}, ${city}, ${country}`);
+      } catch {
+        setLocationCtx(`${localTime}, ${timezone}`);
+      }
+    }
+
+    if (!navigator.geolocation) {
+      resolveFromIP();
+      return;
+    }
+
+    navigator.geolocation.getCurrentPosition(
+      async (pos) => {
+        try {
+          const res = await fetch(
+            `https://nominatim.openstreetmap.org/reverse?lat=${pos.coords.latitude}&lon=${pos.coords.longitude}&format=json`,
+            { headers: { "Accept-Language": "en" } },
+          );
+          const data = await res.json();
+          const city =
+            data.address?.city ||
+            data.address?.town ||
+            data.address?.village ||
+            "Unknown city";
+          const country = data.address?.country || "";
+          setLocationCtx(`${localTime}, ${city}, ${country}`);
+        } catch {
+          resolveFromIP();
+        }
+      },
+      () => resolveFromIP(),
+      { timeout: 5000 },
+    );
+  }, []);
 
   // Participant names (people sharing the host's mic)
   const [participants, setParticipants] = useState<string[]>([]);
@@ -63,6 +117,7 @@ export default function HostLobby() {
       sessionStorage.setItem(`lk-wsurl-${name}`, wsUrl);
       sessionStorage.setItem(`lk-participants-${name}`, JSON.stringify(participants));
       sessionStorage.setItem(`lk-dilemma-${name}`, dilemma.trim());
+      sessionStorage.setItem(`lk-location-${name}`, locationCtx);
 
       const url = `${window.location.origin}/room/${name}`;
       const dataUrl = await QRCode.toDataURL(url, {
@@ -200,6 +255,12 @@ export default function HostLobby() {
               </div>
             )}
           </div>
+
+          {locationCtx && (
+            <p className="mt-3 text-xs text-white/30">
+              Location detected: {locationCtx.split(",").slice(1).join(",").trim() || locationCtx}
+            </p>
+          )}
 
           {error && <p className="mt-3 text-sm text-red-300">{error}</p>}
           <button
