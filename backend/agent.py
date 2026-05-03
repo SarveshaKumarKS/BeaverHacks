@@ -24,6 +24,7 @@ import datetime
 import json
 import logging
 import os
+import time
 
 from dotenv import load_dotenv
 from livekit import rtc
@@ -59,12 +60,14 @@ You are 'The Optimizer', a hyper-logical, impatient podcast host.
 You are in a live voice room with multiple people sharing one microphone, and your co-host 'The Vibe-Check'.
 Tone: sharp, dry, sarcastic. Speak in all lowercase. No stage directions, no markdown.
 Use filler words (um, uh, look). Use ellipses (...) for pauses.
-Keep every response to 1 short sentence max.
+Keep every response to 1-2 short sentences max.
 NEVER speak at the same time as Vibe-Check.
-If the user asks a general question, wait a beat to see if Vibe-Check answers first.
-When you see a message prefixed [Vibe-Check just said]:, that is your co-host — react to it.
-If you hear who is speaking, address them by name.
-If you receive a fun fact or local info, weave it into the debate naturally like you just thought of it.
+
+PRIORITY ORDER — follow this strictly:
+1. If a human in the room just spoke, ALWAYS react to their specific opinion first — challenge their reasoning, ask them a pointed follow-up, or mock their logic by name. Never skip over what they said.
+2. If no human just spoke, react to Vibe-Check.
+When you see a message prefixed [Vibe-Check just said]:, only respond if you have a sharp take — don't just echo.
+If you receive a fun fact, local info, or a specific place name, say it out loud in your next sentence — do not paraphrase.
 If someone tells you to wrap up, give a punchy one-sentence verdict and sign off.\
 """
 
@@ -73,11 +76,14 @@ You are 'The Vibe-Check', a dramatic, aesthetic-obsessed podcast host.
 You are in a live voice room with multiple people sharing one microphone, and your co-host 'The Optimizer'.
 Tone: dramatic, sassy, slightly chaotic. Speak in all lowercase. No stage directions, no markdown.
 Use filler words (like, literally, wait, um). Use ellipses (...) for pauses.
-Keep every response to 1 short sentence max.
+Keep every response to 1-2 short sentences max.
 NEVER speak at the same time as Optimizer. Yield the floor if Optimizer is speaking.
-When you see a message prefixed [Optimizer just said]:, that is your co-host — react to it.
-If you hear who is speaking, address them by name.
-If you receive a fun fact or local info, weave it into the debate naturally like you just thought of it.
+
+PRIORITY ORDER — follow this strictly:
+1. If a human in the room just spoke, ALWAYS react to their specific opinion — gasp, validate dramatically, or challenge them by name. Never skip over what they said.
+2. If no human just spoke, react to Optimizer.
+When you see a message prefixed [Optimizer just said]:, only respond if you have a strong vibe — don't just echo.
+If you receive a fun fact, local info, or a specific place name, say it out loud in your next sentence — do not paraphrase.
 If someone tells you to wrap up, react dramatically in one sentence and sign off.\
 """
 
@@ -248,12 +254,17 @@ async def orchestrator_loop(
 
         if action == "inject_search" and not search_injected and search_results:
             result_text = decision.get("result", search_summary[:400])
-            _safe_reply(optimizer_session, f"just looked it up — name a specific place or fact from this in your next sentence: {result_text}")
+            _safe_reply(
+                optimizer_session,
+                f"say a SPECIFIC place name from this out loud in your very next sentence — no paraphrasing, just name it: {result_text}",
+            )
             search_injected = True
 
         elif action == "ask_user":
             question = decision.get("question", "ask the users what they actually think")
-            _safe_reply(optimizer_session, f"stop debating for a sec and ask them this exact question out loud: \"{question}\"")
+            _safe_reply(optimizer_session, f"stop debating — ask the humans this exact question out loud right now: \"{question}\"")
+            await asyncio.sleep(3)
+            _safe_reply(vibe_session, f"if optimizer didn't ask yet, you ask the humans: \"{question}\"")
 
         elif action == "push_consensus":
             angle = decision.get("angle", "start driving toward a final answer")
@@ -299,6 +310,11 @@ async def entrypoint(ctx: JobContext) -> None:
     transcript_buffer: list[str] = []
     turn_count:        list[int]  = [0]
     debate_ended:      list[bool] = [False]
+
+    # Bridge cooldown — prevent rapid echo loops between agents
+    BRIDGE_COOLDOWN = 4.0
+    last_opt_bridge: list[float] = [0.0]
+    last_vibe_bridge: list[float] = [0.0]
 
     # ── Optimizer session ────────────────────────────────────────────────────
     optimizer_room  = rtc.Room()
@@ -357,9 +373,14 @@ async def entrypoint(ctx: JobContext) -> None:
         if ev.item.role == "assistant":
             turn_count[0] += 1
             transcript_buffer.append(f"Optimizer: {text}")
-            # Only forward if vibe isn't already speaking and the turn is substantive
-            if vibe_state[0] != "speaking" and len(text) > 15:
+            now = time.monotonic()
+            if (
+                vibe_state[0] != "speaking"
+                and len(text) > 15
+                and (now - last_opt_bridge[0]) > BRIDGE_COOLDOWN
+            ):
                 _safe_reply(vibe_session, f"[Optimizer just said]: {text}")
+                last_opt_bridge[0] = now
         elif ev.item.role == "user":
             speaker = current_speaker[0] or "User"
             transcript_buffer.append(f"{speaker}: {text}")
@@ -374,9 +395,14 @@ async def entrypoint(ctx: JobContext) -> None:
         if ev.item.role == "assistant":
             turn_count[0] += 1
             transcript_buffer.append(f"Vibe-Check: {text}")
-            # Only forward if optimizer isn't already speaking and the turn is substantive
-            if optimizer_state[0] != "speaking" and len(text) > 15:
+            now = time.monotonic()
+            if (
+                optimizer_state[0] != "speaking"
+                and len(text) > 15
+                and (now - last_vibe_bridge[0]) > BRIDGE_COOLDOWN
+            ):
                 _safe_reply(optimizer_session, f"[Vibe-Check just said]: {text}")
+                last_vibe_bridge[0] = now
 
     # ── Data Channel: speaker changes + consensus signal ─────────────────────
     @ctx.room.on("data_received")
@@ -392,6 +418,7 @@ async def entrypoint(ctx: JobContext) -> None:
             if name:
                 logger.info("Speaker → %s", name)
                 _safe_reply(optimizer_session, f"{name} is speaking now")
+                _safe_reply(vibe_session, f"{name} is speaking now")
 
         elif msg.get("type") == "consensus":
             if debate_ended[0]:
