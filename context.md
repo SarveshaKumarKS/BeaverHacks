@@ -6,7 +6,7 @@
 
 ## What the app does
 
-Two AI voice agents ("The Optimizer" and "The Vibe-Check") debate the user's dilemma in real-time audio inside a shared LiveKit room. Multiple humans can join mid-session via QR code. A live transcript is rendered in the browser.
+Two AI voice agents ("The Optimizer" and "The Vibe-Check") debate the user's dilemma in real-time audio inside a shared LiveKit room. Multiple humans join via QR code and share the host's microphone to speak to the agents. A live transcript is rendered in the browser.
 
 ---
 
@@ -29,6 +29,7 @@ BeaverHacks/
         ├── globals.css
         ├── page.tsx                        ← landing + lobby
         ├── api/token/route.ts              ← JWT + room creation
+        ├── api/start/route.ts              ← signals backend to start debate
         └── room/[session_id]/page.tsx      ← live room UI
 ```
 
@@ -68,16 +69,23 @@ LIVEKIT_API_SECRET=<your LiveKit API secret>
 
 The worker is a single `entrypoint` function registered with `WorkerOptions`. When a user joins a room, LiveKit dispatches a job to this worker.
 
-**Three participants in every room:**
+**Participants in every room:**
 | Identity | Who | Audio role |
 |---|---|---|
 | `host-<timestamp>` | Human host | Publishes mic, subscribed by both agents |
 | `optimizer` | Agent — custom token | Publishes TTS audio (voice: Aoede) |
 | `vibe-check` | Agent — custom token | Publishes TTS audio (voice: Kore) |
-| `guest-<timestamp>` | Additional humans via QR | Publishes mic, subscribed by both agents |
+| `guest-<timestamp>` | Additional humans via QR | Listen only; share host's mic in person |
+| `<dispatch-id>` | Job worker (`ctx.room`) | Internal — appears as a room participant but is not a human or named agent |
 
 **Why both agents have their own `rtc.Room()` connection:**
 Each `AgentSession` publishes audio as a distinct room participant. If two sessions shared one `rtc.Room`, they'd conflict. The job's `ctx.room` is held open (required to keep the job alive) but neither agent publishes through it — they each connect with a custom token via `_make_agent_token(room_name, identity)`.
+
+**Waiting room / start signal flow:**
+Room metadata is initialised as `{ dilemma: "...", status: "waiting" }` when the room is created. The backend worker polls `ctx.room.metadata` every 0.5s. When the host clicks "Start Debate", the frontend POSTs to `/api/start` which calls `RoomServiceClient.updateRoomMetadata(roomName, { dilemma, status: "started" })`. The worker detects the change and proceeds to connect both agent rooms and start sessions.
+
+**Multi-speaker design:**
+Gemini Live API accepts only a single audio stream, so only the host's microphone audio reaches the agents (fundamental API constraint). The workaround for group use: guests physically gather around the host's device and take turns speaking into its mic. The agents are prompted to detect voice changes naturally — no diarization, zero latency overhead.
 
 **Turn-taking guard:**
 ```python
@@ -99,11 +107,14 @@ def _opt_item(ev):
 ```
 Agents never hear each other's audio. Instead, the transcript of each turn is injected into the other agent's context as a user message.
 
-**Multi-user audio:**
-Both sessions are started without `RoomInputOptions` participant filter, so all human participants' microphones are heard by both agents. Any guest who joins via QR is automatically included.
-
 **Debate seeding:**
-After a 2-second sleep (letting sessions connect), the Optimizer is seeded with the dilemma from `ctx.room.metadata`. Vibe-Check reacts via the text bridge.
+After a 2-second sleep (letting sessions connect), the Optimizer is seeded with the dilemma and the participant count from `ctx.room.metadata`. Vibe-Check reacts via the text bridge.
+
+**Agent system prompts — multi-speaker awareness:**
+Both prompts tell the agents that multiple people may speak into one microphone and instruct them to react naturally to voice changes:
+- Optimizer: `"oh wait, new voice — what do you think?"`
+- Vibe-Check: `"wait, is that someone new? hi! spill."`
+No diarization or STT pipeline is used — Gemini Live can perceive different voices in the audio stream directly.
 
 ### Key API facts (livekit-agents 1.x — version 1.5.7 installed)
 - `AgentSession` + `Agent` replaces the old `MultimodalAgent` (removed in 1.x)
@@ -169,13 +180,21 @@ Standard Tailwind directives + dark background gradient. No LiveKit import here 
 
 **POST** `/api/token` — host flow:
 - Body: `{ roomName, identity, dilemma }`
-- Creates the LiveKit room with `RoomServiceClient.createRoom({ name: roomName, metadata: dilemma })`
-- The dilemma is stored as room metadata — `agent.py` reads it via `ctx.room.metadata`
+- Creates the LiveKit room with metadata `{ dilemma, status: "waiting" }` via `RoomServiceClient.createRoom()`
+- The dilemma + status are stored as room metadata — `agent.py` reads them via `ctx.room.metadata`
 - Returns `{ token, wsUrl, roomName }`
 
 **GET** `/api/token?room=<name>&identity=<id>` — guest flow:
 - Returns a fresh participant JWT for guests joining via QR code
 - Identity defaults to `guest-${Date.now()}` if not provided
+
+### `src/app/api/start/route.ts` — Start Signal API
+
+**POST** `/api/start`:
+- Body: `{ roomName, dilemma }`
+- Calls `RoomServiceClient.updateRoomMetadata(roomName, { dilemma, status: "started" })`
+- Backend worker detects this change and launches both agent sessions
+- Returns `{ ok: true }`
 
 ### `src/app/room/[session_id]/page.tsx` — Live Room
 
@@ -183,30 +202,42 @@ Standard Tailwind directives + dark background gradient. No LiveKit import here 
 - Host: reads cached token from `sessionStorage` (set by landing page)
 - Guest: fetches via GET `/api/token?room=...`
 
-**Components inside `<LiveKitRoom>`:**
+**`RoomInner` — metadata router:**
+- Reads room metadata via `useRoomContext()` + `"roomMetadataChanged"` event
+- If `status === "waiting"`: renders `WaitingRoom`
+- Otherwise: renders `RoomContent`
 
-`RoomContent` — main UI inside the LiveKit context:
-- Reads room metadata via `useRoomContext()` + `"roomMetadataChanged"` event to display the dilemma
-- Tracks active speaker via `"activeSpeakersChanged"` event, maps identity → display name
+**`WaitingRoom`:**
+- Lists human participants only — filters using `AGENT_IDENTITIES = new Set(["optimizer", "vibe-check"])`.
+  > **Note:** The job worker (`ctx.room` connection) also appears here because its dispatch-assigned identity doesn't match either filter entry. Known cosmetic issue; fix is to change the filter to an allowlist: `p.identity.startsWith("host-") || p.identity.startsWith("guest-")`.
+- Host (`identity.startsWith("host-")`) sees a "Start Debate" button — clicking it POSTs to `/api/start`
+- Guests see "Waiting for host to start…"
+
+**`RoomContent` — main UI inside the LiveKit context:**
 - Renders two `AgentCard` components (amber ring for Optimizer, fuchsia for Vibe-Check) with speaking pulse indicator
 - Renders `BarVisualizer` (24 bars, audio track from `useVoiceAssistant()`)
 - Renders `TranscriptPanel`
-- Renders `VoiceAssistantControlBar` (mic toggle + leave button)
+- Renders `ParticipantControls` (mic toggle + leave button)
 - Renders `RoomAudioRenderer` (makes agent audio audible)
 
-`TranscriptPanel` + `useTranscript` hook:
+**`ParticipantControls`:**
+- Replaces `VoiceAssistantControlBar` (which required a voice assistant session)
+- Uses `useLocalParticipant()` and calls `setMicrophoneEnabled(true)` on mount so mic is on by default
+- Renders a toggle mic button + leave button
+
+**`TranscriptPanel` + `useTranscript` hook:**
 - Listens to `room.on("transcriptionReceived", ...)` — fired by LiveKit for both agent TTS and human STT
 - Merges non-final (streaming) segments in-place by segment `id`; text dims to 50% opacity until `final: true`
 - Auto-scrolls to bottom via `bottomRef`
 - Hidden until first line arrives
 
-`speakerName(participant, localIdentity)`:
+**`speakerName(participant, localIdentity)`:**
 - `participant.identity === localIdentity` → `"You"` (local human)
 - `identity === "optimizer"` → `"The Optimizer"`
 - `identity === "vibe-check"` → `"The Vibe-Check"`
 - anything else → `participant.identity` (guest users shown by their raw identity, emerald color)
 
-`QRButton` — "Invite" button in the header:
+**`QRButton` — "Invite" button in the header:**
 - Generates QR data URL once on mount (200px, dark-themed)
 - Toggles a popover on click showing the QR with "Scan to join" label
 - Share link also available via "Share" copy button next to it
@@ -232,7 +263,7 @@ LIVEKIT_API_KEY=<key>
 LIVEKIT_API_SECRET=<secret>
 ```
 
-The `@netlify/plugin-nextjs` package is in `devDependencies` in `package.json`. It is required for dynamic routes (`/room/[session_id]`) and API routes (`/api/token`) to work on Netlify.
+The `@netlify/plugin-nextjs` package is in `devDependencies` in `package.json`. It is required for dynamic routes (`/room/[session_id]`) and API routes (`/api/token`, `/api/start`) to work on Netlify.
 
 ---
 
@@ -249,6 +280,10 @@ The `@netlify/plugin-nextjs` package is in `devDependencies` in `package.json`. 
 | `transcriptionReceived` participant arg is `Participant \| undefined` | Guard with `if (!participant) return` before using it |
 | Hydration mismatch from Dark Reader extension | `suppressHydrationWarning` on `<html>` in `layout.tsx` |
 | QR flash on landing — user couldn't see it | Removed `router.push` from submit handler; added explicit lobby view with "Enter Room" button |
+| Guest mic was always muted | Replaced `VoiceAssistantControlBar` with `ParticipantControls` using `useLocalParticipant()` + `setMicrophoneEnabled(true)` on mount |
+| Agents only hear the first participant to join | Gemini Live API accepts a single audio stream — `AgentSession` wires only ONE participant's audio to Gemini. Accepted as demo limitation. Workaround: waiting room ensures all participants join before `session.start()`, but only the first participant's audio is processed by Gemini |
+| Agents unaware multiple people share one mic | Updated system prompts to tell agents multiple voices may come from one mic and to react naturally to voice changes (zero latency, no diarization) |
+| Job worker participant appears in waiting room list | `ctx.room` connects with a dispatch-assigned identity that doesn't match `AGENT_IDENTITIES`. Fix: change filter to allowlist `host-*` / `guest-*` identities instead of blocklist |
 
 ---
 
@@ -268,4 +303,4 @@ npm install
 npm run dev
 ```
 
-Open `http://localhost:3000`, enter a dilemma, share the QR, then enter the room.
+Open `http://localhost:3000`, enter a dilemma, share the QR, then enter the room. All participants join the waiting room first; host clicks "Start Debate" to launch the agents.
