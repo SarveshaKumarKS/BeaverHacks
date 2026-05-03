@@ -217,12 +217,15 @@ async def orchestrator_loop(
                     {"role": "user", "content": user_content},
                 ],
                 temperature=0.4,
-                max_tokens=300,
+                max_tokens=600,
             )
             raw = (resp.choices[0].message.content or "{}").strip()
             # strip markdown fences if model wraps output
             if raw.startswith("```"):
                 raw = raw.split("```")[1].lstrip("json").strip()
+            # guard against truncated JSON
+            if not raw.endswith("}"):
+                raw = raw[:raw.rfind("}")+1] if "}" in raw else "{}"
             decision = json.loads(raw)
         except Exception as e:
             logger.warning("Orchestrator call failed: %s", e)
@@ -232,33 +235,29 @@ async def orchestrator_loop(
         action = decision.get("action", "continue")
         logger.info("Orchestrator → %s", decision)
 
+        def _safe_reply(session: AgentSession, text: str) -> None:
+            try:
+                session.generate_reply(user_input=text)
+            except Exception as exc:
+                logger.warning("generate_reply failed (session may be reconnecting): %s", exc)
+
         if action == "inject_search" and not search_injected and search_results:
             result_text = decision.get("result", search_summary[:400])
-            optimizer_session.generate_reply(
-                user_input=f"[RESEARCH ASSISTANT]: {result_text} — work this into the debate naturally."
-            )
+            _safe_reply(optimizer_session, f"hey, just found this — {result_text}")
             search_injected = True
 
         elif action == "ask_user":
             question = decision.get("question", "ask the users what they actually think")
-            optimizer_session.generate_reply(
-                user_input=f"[ORCHESTRATOR]: Ask the people in the room — {question}"
-            )
+            _safe_reply(optimizer_session, f"ask the people here: {question}")
 
         elif action == "push_consensus":
             angle = decision.get("angle", "start driving toward a final answer")
-            optimizer_session.generate_reply(
-                user_input=f"[ORCHESTRATOR]: {angle} — push toward a verdict now."
-            )
+            _safe_reply(optimizer_session, f"ok wrap it up — {angle}")
 
         elif action == "end_debate":
             verdict = decision.get("verdict", "the debate has concluded")
-            optimizer_session.generate_reply(
-                user_input=f"[WRAP UP]: Deliver a final verdict. Key takeaway: {verdict}"
-            )
-            vibe_session.generate_reply(
-                user_input="[WRAP UP]: React to the Optimizer's verdict and sign off dramatically in one sentence."
-            )
+            _safe_reply(optimizer_session, f"final verdict time — {verdict}")
+            _safe_reply(vibe_session, "react to the optimizer's verdict and sign off in one dramatic sentence")
             debate_ended[0] = True
             break
 
@@ -348,7 +347,7 @@ async def entrypoint(ctx: JobContext) -> None:
         if ev.item.role == "assistant":
             turn_count[0] += 1
             transcript_buffer.append(f"Optimizer: {text}")
-            vibe_session.generate_reply(user_input=f"[Optimizer just said]: {text}")
+            _safe_reply(vibe_session, f"[Optimizer just said]: {text}")
         elif ev.item.role == "user":
             speaker = current_speaker[0] or "User"
             transcript_buffer.append(f"{speaker}: {text}")
@@ -363,7 +362,7 @@ async def entrypoint(ctx: JobContext) -> None:
         if ev.item.role == "assistant":
             turn_count[0] += 1
             transcript_buffer.append(f"Vibe-Check: {text}")
-            optimizer_session.generate_reply(user_input=f"[Vibe-Check just said]: {text}")
+            _safe_reply(optimizer_session, f"[Vibe-Check just said]: {text}")
 
     # ── Data Channel: speaker changes + consensus signal ─────────────────────
     @ctx.room.on("data_received")
@@ -378,21 +377,15 @@ async def entrypoint(ctx: JobContext) -> None:
             current_speaker[0] = name
             if name:
                 logger.info("Speaker → %s", name)
-                optimizer_session.generate_reply(
-                    user_input=f"[{name} is now speaking — listen for their voice]"
-                )
+                _safe_reply(optimizer_session, f"{name} is speaking now")
 
         elif msg.get("type") == "consensus":
             if debate_ended[0]:
                 return
             logger.info("Consensus signal received from UI")
             debate_ended[0] = True
-            optimizer_session.generate_reply(
-                user_input="[WRAP UP]: The group has reached a decision — deliver your final verdict in one punchy sentence and sign off."
-            )
-            vibe_session.generate_reply(
-                user_input="[WRAP UP]: React to the Optimizer's verdict dramatically in one sentence and sign off."
-            )
+            _safe_reply(optimizer_session, "the group just agreed — give your final verdict in one punchy sentence and sign off")
+            _safe_reply(vibe_session, "react to the optimizer's verdict and sign off dramatically in one sentence")
 
     # ── Start both sessions ──────────────────────────────────────────────────
     asyncio.create_task(
@@ -417,13 +410,10 @@ async def entrypoint(ctx: JobContext) -> None:
 
     location_line = f"Current context: {location_ctx}. " if location_ctx else ""
 
-    optimizer_session.generate_reply(
-        user_input=(
-            f"[SYSTEM]: The dilemma is: \"{dilemma}\". "
-            f"{location_line}"
-            f"{participant_context} "
-            "Welcome everyone by name if you know them, reference the time or place if it's relevant, and kick off the debate in one short sentence."
-        )
+    _safe_reply(
+        optimizer_session,
+        f"the dilemma is: \"{dilemma}\". {location_line}{participant_context} "
+        "welcome everyone by name if you know them, reference the time or place if relevant, and kick off the debate in one short sentence.",
     )
 
     logger.info("Debate started. Launching background tasks.")
