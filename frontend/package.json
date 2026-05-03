@@ -1,5 +1,5 @@
 {
-  "name": "the-consensus-duo-frontend",
+  "name": "the-decider-frontend",
   "version": "0.1.0",
   "private": true,
   "scripts": {
@@ -9,20 +9,23 @@
     "lint": "next lint"
   },
   "dependencies": {
-    "@types/qrcode": "1.5.5",
+    "@livekit/components-react": "^2.0.0",
+    "@livekit/components-styles": "^1.0.0",
     "clsx": "2.1.1",
     "framer-motion": "11.15.0",
+    "livekit-client": "^2.0.0",
+    "livekit-server-sdk": "^2.0.0",
     "lucide-react": "0.468.0",
     "next": "^16.2.4",
     "qrcode": "1.5.4",
     "react": "^19.2.3",
     "react-dom": "^19.2.3",
-    "socket.io-client": "4.8.1",
     "tailwind-merge": "2.5.5",
     "zustand": "5.0.2"
   },
   "devDependencies": {
     "@types/node": "22.10.2",
+    "@types/qrcode": "1.5.5",
     "@types/react": "^19.2.8",
     "@types/react-dom": "^19.2.3",
     "autoprefixer": "10.4.20",

@@ -2,6 +2,8 @@
 @tailwind components;
 @tailwind utilities;
 
+@import "@livekit/components-styles";
+
 :root {
   color-scheme: dark;
 }
