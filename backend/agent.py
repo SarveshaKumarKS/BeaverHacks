@@ -330,14 +330,19 @@ async def entrypoint(ctx: JobContext) -> None:
         )
     )
 
-    # ── Turn-Taking Guard ────────────────────────────────────────────────────
+    # ── Turn-Taking Guard + State Tracking ──────────────────────────────────
+    optimizer_state: list[str] = ["idle"]
+    vibe_state:      list[str] = ["idle"]
+
     @optimizer_session.on("agent_state_changed")
     def _opt_state(ev: AgentStateChangedEvent) -> None:
+        optimizer_state[0] = ev.new_state
         if ev.new_state == "speaking":
             vibe_session.interrupt()
 
     @vibe_session.on("agent_state_changed")
     def _vibe_state(ev: AgentStateChangedEvent) -> None:
+        vibe_state[0] = ev.new_state
         if ev.new_state == "speaking":
             optimizer_session.interrupt()
 
@@ -352,7 +357,9 @@ async def entrypoint(ctx: JobContext) -> None:
         if ev.item.role == "assistant":
             turn_count[0] += 1
             transcript_buffer.append(f"Optimizer: {text}")
-            _safe_reply(vibe_session, f"[Optimizer just said]: {text}")
+            # Only forward if vibe isn't already speaking and the turn is substantive
+            if vibe_state[0] != "speaking" and len(text) > 15:
+                _safe_reply(vibe_session, f"[Optimizer just said]: {text}")
         elif ev.item.role == "user":
             speaker = current_speaker[0] or "User"
             transcript_buffer.append(f"{speaker}: {text}")
@@ -367,7 +374,9 @@ async def entrypoint(ctx: JobContext) -> None:
         if ev.item.role == "assistant":
             turn_count[0] += 1
             transcript_buffer.append(f"Vibe-Check: {text}")
-            _safe_reply(optimizer_session, f"[Vibe-Check just said]: {text}")
+            # Only forward if optimizer isn't already speaking and the turn is substantive
+            if optimizer_state[0] != "speaking" and len(text) > 15:
+                _safe_reply(optimizer_session, f"[Vibe-Check just said]: {text}")
 
     # ── Data Channel: speaker changes + consensus signal ─────────────────────
     @ctx.room.on("data_received")
