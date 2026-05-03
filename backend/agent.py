@@ -134,28 +134,49 @@ Never explain yourself. Output only the JSON.\
 # Helper: safe generate_reply with strict alternation enforcement
 # ---------------------------------------------------------------------------
 
-# Module-level alternation state (set during entrypoint, referenced by _safe_reply)
-_last_spoke:       list[str]  = [""]   # "optimizer" | "vibe" | ""
-_last_question_t:  list[float] = [0.0] # monotonic time of last question sent to user
-_optimizer_ref:    list       = [None]
-_vibe_ref:         list       = [None]
+# Module-level state (set during entrypoint, referenced by _safe_reply)
+_last_spoke:        list[str]  = [""]     # "optimizer" | "vibe" | ""
+_last_question_t:   list[float] = [0.0]  # monotonic time of last question sent to user
+_optimizer_ref:     list       = [None]
+_vibe_ref:          list       = [None]
+_optimizer_state_g: list[str]  = ["idle"] # mirrored from entrypoint for _safe_reply
+_vibe_state_g:      list[str]  = ["idle"] # mirrored from entrypoint for _safe_reply
 
 QUESTION_COOLDOWN = 25.0  # seconds before another direct question is allowed
+BUSY_STATES = {"speaking", "thinking"}  # states where generate_reply will time out
 
 def _safe_reply(session, text: str, force: bool = False) -> None:
     """Send a reply to a session.
 
-    Enforces strict alternation: the same agent cannot speak twice in a row
-    unless force=True (used for watchdog / end-of-debate signals).
+    Enforces strict alternation and session-state awareness:
+    - Blocks same-agent consecutive turns (unless force=True).
+    - Skips injection if the target session is busy (speaking/thinking) to
+      avoid the 'generate_reply timed out' error from the orchestrator.
+    - With force=True (end-of-debate / watchdog), interrupts first to clear
+      the session before injecting.
     """
     who = "optimizer" if session is _optimizer_ref[0] else "vibe"
     if not force and _last_spoke[0] == who:
-        logger.debug("_safe_reply blocked — %s already spoke last, waiting for other agent", who)
+        logger.debug("_safe_reply blocked — %s already spoke last", who)
         return
+
+    agent_state = _optimizer_state_g[0] if who == "optimizer" else _vibe_state_g[0]
+    if agent_state in BUSY_STATES:
+        if force:
+            # Clear the session before injecting the forced prompt
+            try:
+                session.interrupt()
+            except Exception:
+                pass
+        else:
+            # Non-critical injection — skip rather than queue a timeout
+            logger.debug("_safe_reply skipped — %s is %s (busy)", who, agent_state)
+            return
+
     try:
         session.generate_reply(user_input=text)
     except Exception as exc:
-        logger.warning("generate_reply failed (session may be reconnecting): %s", exc)
+        logger.warning("generate_reply failed: %s", exc)
 
 # ---------------------------------------------------------------------------
 # Helper: agent token
@@ -406,8 +427,10 @@ async def entrypoint(ctx: JobContext) -> None:
     last_vibe_turn:   list[int]   = [0]    # turn_count when vibe last spoke (watchdog)
 
     # Alternation + question-cooldown state (module-level refs set here for _safe_reply)
-    _last_spoke[0]      = ""
-    _last_question_t[0] = 0.0
+    _last_spoke[0]        = ""
+    _last_question_t[0]   = 0.0
+    _optimizer_state_g[0] = "idle"
+    _vibe_state_g[0]      = "idle"
 
     # ── Optimizer session ────────────────────────────────────────────────────
     optimizer_room  = rtc.Room()
@@ -453,6 +476,7 @@ async def entrypoint(ctx: JobContext) -> None:
     @optimizer_session.on("agent_state_changed")
     def _opt_state(ev: AgentStateChangedEvent) -> None:
         optimizer_state[0] = ev.new_state
+        _optimizer_state_g[0] = ev.new_state  # mirror for _safe_reply visibility
         if ev.new_state == "speaking":
             vibe_session.interrupt()
             # Hard alternation: if optimizer just spoke and is speaking again, cut it off
@@ -463,6 +487,7 @@ async def entrypoint(ctx: JobContext) -> None:
     @vibe_session.on("agent_state_changed")
     def _vibe_state(ev: AgentStateChangedEvent) -> None:
         vibe_state[0] = ev.new_state
+        _vibe_state_g[0] = ev.new_state  # mirror for _safe_reply visibility
         if ev.new_state == "speaking":
             optimizer_session.interrupt()
             # Hard alternation: if vibe just spoke and is speaking again, cut it off
