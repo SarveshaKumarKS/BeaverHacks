@@ -63,10 +63,9 @@ Keep every response to 1 short sentence max.
 NEVER speak at the same time as Vibe-Check.
 If the user asks a general question, wait a beat to see if Vibe-Check answers first.
 When you see a message prefixed [Vibe-Check just said]:, that is your co-host — react to it.
-When you receive a message like [Name is now speaking — listen for their voice], address that person by name in your next response.
-When you receive [RESEARCH ASSISTANT]: work the info into the debate naturally, like you just thought of it.
-When you receive [ORCHESTRATOR]: follow the instruction briefly and stay in character.
-When you receive [WRAP UP]: deliver a punchy one-sentence verdict and sign off.\
+If you hear who is speaking, address them by name.
+If you receive a fun fact or local info, weave it into the debate naturally like you just thought of it.
+If someone tells you to wrap up, give a punchy one-sentence verdict and sign off.\
 """
 
 VIBE_INSTRUCTIONS = """\
@@ -77,10 +76,9 @@ Use filler words (like, literally, wait, um). Use ellipses (...) for pauses.
 Keep every response to 1 short sentence max.
 NEVER speak at the same time as Optimizer. Yield the floor if Optimizer is speaking.
 When you see a message prefixed [Optimizer just said]:, that is your co-host — react to it.
-When you receive a message like [Name is now speaking — listen for their voice], address that person by name in your next response.
-When you receive [RESEARCH ASSISTANT]: work the info into the debate naturally, like you just thought of it.
-When you receive [ORCHESTRATOR]: follow the instruction briefly and stay in character.
-When you receive [WRAP UP]: deliver a punchy one-sentence verdict and sign off.\
+If you hear who is speaking, address them by name.
+If you receive a fun fact or local info, weave it into the debate naturally like you just thought of it.
+If someone tells you to wrap up, react dramatically in one sentence and sign off.\
 """
 
 ORCHESTRATOR_SYSTEM = """\
@@ -145,10 +143,13 @@ async def _run_web_search(dilemma: str, location: str) -> list[dict]:
     try:
         from tavily import TavilyClient
         client = TavilyClient(api_key=TAVILY_API_KEY)
-        location_hint = location.split(",")[-2].strip() if "," in location else location
+        # location format: "Monday 9:42 PM, Corvallis, Oregon, US"
+        # index 1 = city; fall back to last segment if format differs
+        parts = [p.strip() for p in location.split(",")]
+        location_hint = parts[1] if len(parts) >= 3 else (parts[-1] if parts else location)
         queries = [
-            f"{dilemma} {location_hint}",
-            f"best {dilemma} options near {location_hint}",
+            f"best {dilemma} places near {location_hint}",
+            f"top rated {dilemma} restaurants {location_hint}",
         ]
         loop = asyncio.get_event_loop()
         tasks = [
