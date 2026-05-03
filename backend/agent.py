@@ -364,7 +364,8 @@ async def orchestrator_loop(
         elif action == "ask_user":
             now = time.monotonic()
             if now - _last_question_t[0] < QUESTION_COOLDOWN:
-                logger.debug("Suppressing ask_user — question cooldown active")
+                logger.debug("Suppressing ask_user — nudging other agent to keep debate alive")
+                _safe_reply(first_session, "make your strongest point right now — keep the debate going")
             else:
                 question = decision.get("question", "ask the users what they actually think")
                 _safe_reply(first_session, f"stop debating for a second — ask the humans this exact question: \"{question}\"")
