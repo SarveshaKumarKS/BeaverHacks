@@ -105,6 +105,16 @@ Never explain yourself. Output only the JSON.\
 """
 
 # ---------------------------------------------------------------------------
+# Helper: safe generate_reply (swallows errors during Gemini session reconnects)
+# ---------------------------------------------------------------------------
+
+def _safe_reply(session: AgentSession, text: str) -> None:
+    try:
+        session.generate_reply(user_input=text)
+    except Exception as exc:
+        logger.warning("generate_reply failed (session may be reconnecting): %s", exc)
+
+# ---------------------------------------------------------------------------
 # Helper: agent token
 # ---------------------------------------------------------------------------
 
@@ -235,12 +245,6 @@ async def orchestrator_loop(
 
         action = decision.get("action", "continue")
         logger.info("Orchestrator → %s", decision)
-
-        def _safe_reply(session: AgentSession, text: str) -> None:
-            try:
-                session.generate_reply(user_input=text)
-            except Exception as exc:
-                logger.warning("generate_reply failed (session may be reconnecting): %s", exc)
 
         if action == "inject_search" and not search_injected and search_results:
             result_text = decision.get("result", search_summary[:400])
