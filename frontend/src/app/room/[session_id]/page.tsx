@@ -121,31 +121,42 @@ function TranscriptPanel() {
 
 function SpeakerSelector({ participants }: { participants: string[] }) {
   const room = useRoomContext();
+  const { localParticipant } = useLocalParticipant();
   const [active, setActive] = useState<string | null>(null);
 
   if (participants.length === 0) return null;
 
   function selectSpeaker(name: string) {
-    setActive(name);
-    const payload = new TextEncoder().encode(JSON.stringify({ type: "speaker", name }));
-    room.localParticipant.publishData(payload, { reliable: true });
+    if (active === name) {
+      // Tap active name again — mute and deselect
+      setActive(null);
+      localParticipant.setMicrophoneEnabled(false);
+      const payload = new TextEncoder().encode(JSON.stringify({ type: "speaker", name: "" }));
+      room.localParticipant.publishData(payload, { reliable: true });
+    } else {
+      setActive(name);
+      localParticipant.setMicrophoneEnabled(true);
+      const payload = new TextEncoder().encode(JSON.stringify({ type: "speaker", name }));
+      room.localParticipant.publishData(payload, { reliable: true });
+    }
   }
 
   return (
     <div className="flex w-full max-w-lg flex-col items-center gap-3">
-      <p className="text-xs uppercase tracking-widest text-white/30">Who&apos;s speaking?</p>
+      <p className="text-xs uppercase tracking-widest text-white/30">Tap your name to speak</p>
       <div className="flex flex-wrap justify-center gap-2">
         {participants.map((name) => (
           <button
             key={name}
             type="button"
             onClick={() => selectSpeaker(name)}
-            className={`rounded-full px-4 py-2 text-sm font-semibold transition ${
+            className={`flex items-center gap-2 rounded-full px-4 py-2 text-sm font-semibold transition ${
               active === name
                 ? "bg-amber-400 text-black shadow-lg"
                 : "bg-white/10 text-white/70 hover:bg-white/20"
             }`}
           >
+            {active === name && <Mic size={13} />}
             {name}
           </button>
         ))}
@@ -228,7 +239,7 @@ function RoomContent({ dilemma, participants, onLeave }: { dilemma: string; part
       <TranscriptPanel />
 
       {/* Mic / disconnect controls */}
-      <ParticipantControls onLeave={onLeave} />
+      <ParticipantControls onLeave={onLeave} showMic={participants.length === 0} />
 
       {/* Renders all remote audio tracks so the agents can be heard */}
       <RoomAudioRenderer />
@@ -236,27 +247,30 @@ function RoomContent({ dilemma, participants, onLeave }: { dilemma: string; part
   );
 }
 
-function ParticipantControls({ onLeave }: { onLeave: () => void }) {
+function ParticipantControls({ onLeave, showMic }: { onLeave: () => void; showMic: boolean }) {
   const { localParticipant, isMicrophoneEnabled } = useLocalParticipant();
 
   useEffect(() => {
-    localParticipant.setMicrophoneEnabled(true);
-  }, [localParticipant]);
+    // When speaker buttons handle the mic, start muted; otherwise auto-enable
+    localParticipant.setMicrophoneEnabled(showMic);
+  }, [localParticipant, showMic]);
 
   return (
     <div className="flex items-center gap-3">
-      <button
-        type="button"
-        onClick={() => localParticipant.setMicrophoneEnabled(!isMicrophoneEnabled)}
-        className={`flex items-center gap-2 rounded-full px-5 py-3 text-sm font-semibold transition ${
-          isMicrophoneEnabled
-            ? "bg-white/10 text-white hover:bg-white/20"
-            : "bg-red-500/20 text-red-400 hover:bg-red-500/30"
-        }`}
-      >
-        {isMicrophoneEnabled ? <Mic size={16} /> : <MicOff size={16} />}
-        {isMicrophoneEnabled ? "Mute" : "Unmute"}
-      </button>
+      {showMic && (
+        <button
+          type="button"
+          onClick={() => localParticipant.setMicrophoneEnabled(!isMicrophoneEnabled)}
+          className={`flex items-center gap-2 rounded-full px-5 py-3 text-sm font-semibold transition ${
+            isMicrophoneEnabled
+              ? "bg-white/10 text-white hover:bg-white/20"
+              : "bg-red-500/20 text-red-400 hover:bg-red-500/30"
+          }`}
+        >
+          {isMicrophoneEnabled ? <Mic size={16} /> : <MicOff size={16} />}
+          {isMicrophoneEnabled ? "Mute" : "Unmute"}
+        </button>
+      )}
       <button
         type="button"
         onClick={onLeave}

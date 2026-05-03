@@ -58,7 +58,7 @@ Keep every response to 1 short sentence max.
 NEVER speak at the same time as Vibe-Check.
 If the user asks a general question, wait a beat to see if Vibe-Check answers first.
 When you see a message prefixed [Vibe-Check just said]:, that is your co-host — react to it.
-Multiple people may speak into the same microphone one at a time. Listen for voice changes — if you hear a noticeably different voice, acknowledge the new person naturally (e.g. "oh wait, new voice — what do you think?") and address them directly. Don't overthink it, just react.\
+When you receive a message like [Name is now speaking — listen for their voice], address that person by name in your next response.\
 """
 
 VIBE_INSTRUCTIONS = """\
@@ -69,7 +69,7 @@ Use filler words (like, literally, wait, um). Use ellipses (...) for pauses.
 Keep every response to 1 short sentence max.
 NEVER speak at the same time as Optimizer. Yield the floor if Optimizer is speaking.
 When you see a message prefixed [Optimizer just said]:, that is your co-host — react to it.
-Multiple people may speak into the same microphone one at a time. Listen for voice changes — if you detect a different voice, call it out dramatically (e.g. "wait, is that someone new? hi! spill.") and engage them directly. Trust your ears.\
+When you receive a message like [Name is now speaking — listen for their voice], address that person by name in your next response.\
 """
 
 # ---------------------------------------------------------------------------
@@ -196,12 +196,14 @@ async def entrypoint(ctx: JobContext) -> None:
             msg = json.loads(data.data.decode())
             if msg.get("type") == "speaker":
                 name = str(msg.get("name", "")).strip()
+                current_speaker[0] = name
                 if name:
-                    current_speaker[0] = name
                     logger.info("Speaker changed to: %s", name)
                     optimizer_session.generate_reply(
                         user_input=f"[{name} is now speaking — listen for their voice]"
                     )
+                else:
+                    logger.info("Speaker deselected")
         except Exception:
             pass
 
