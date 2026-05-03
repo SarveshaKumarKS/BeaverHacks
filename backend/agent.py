@@ -469,8 +469,18 @@ async def entrypoint(ctx: JobContext) -> None:
                 return
             logger.info("Consensus signal received from UI")
             debate_ended[0] = True
-            _safe_reply(optimizer_session, "the group just agreed — give your final verdict in one punchy sentence and sign off")
-            _safe_reply(vibe_session, "react to the optimizer's verdict and sign off dramatically in one sentence")
+            _safe_reply(
+                optimizer_session,
+                "the group just agreed — deliver your final one-sentence verdict in the funniest, most dramatic way possible and sign off",
+            )
+            # delay vibe's cue so optimizer finishes speaking before vibe reacts
+            async def _vibe_signoff() -> None:
+                await asyncio.sleep(6)
+                _safe_reply(
+                    vibe_session,
+                    "react to the optimizer's verdict with maximum drama in one sentence, then sign off in the most extra way possible",
+                )
+            asyncio.create_task(_vibe_signoff())
 
     # ── Start both sessions ──────────────────────────────────────────────────
     asyncio.create_task(
