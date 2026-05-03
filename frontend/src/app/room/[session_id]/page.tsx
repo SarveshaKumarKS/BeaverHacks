@@ -9,10 +9,11 @@ import {
   useVoiceAssistant,
   useRoomContext,
   useLocalParticipant,
+  useParticipants,
 } from "@livekit/components-react";
 import type { Participant, TranscriptionSegment } from "livekit-client";
 import QRCode from "qrcode";
-import { Copy, LogOut, Mic, MicOff, QrCode, Radio } from "lucide-react";
+import { ArrowRight, Copy, LogOut, Mic, MicOff, QrCode, Radio, Users } from "lucide-react";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -114,17 +115,10 @@ function TranscriptPanel() {
 // Inner room UI — rendered inside <LiveKitRoom>
 // ---------------------------------------------------------------------------
 
-function RoomContent({ dilemma, setDilemma, onLeave }: { dilemma: string; setDilemma: (d: string) => void; onLeave: () => void }) {
+function RoomContent({ dilemma, onLeave }: { dilemma: string; onLeave: () => void }) {
   const { state, audioTrack } = useVoiceAssistant();
   const room = useRoomContext();
   const [speakerLabel, setSpeakerLabel] = useState("");
-
-  useEffect(() => {
-    if (room.metadata) setDilemma(room.metadata);
-    const onMetadata = () => { if (room.metadata) setDilemma(room.metadata); };
-    room.on("roomMetadataChanged", onMetadata);
-    return () => void room.off("roomMetadataChanged", onMetadata);
-  }, [room, setDilemma]);
 
   useEffect(() => {
     const onActiveChange = () => {
@@ -292,6 +286,120 @@ function AgentCard({
 }
 
 // ---------------------------------------------------------------------------
+// Waiting room — shown before host clicks Start
+// ---------------------------------------------------------------------------
+
+const AGENT_IDENTITIES = new Set(["optimizer", "vibe-check"]);
+
+function WaitingRoom({ roomName, dilemma }: { roomName: string; dilemma: string }) {
+  const room = useRoomContext();
+  const allParticipants = useParticipants();
+  const [starting, setStarting] = useState(false);
+
+  const isHost = room.localParticipant.identity.startsWith("host-");
+  const humans = allParticipants.filter((p) => !AGENT_IDENTITIES.has(p.identity));
+
+  async function startDebate() {
+    setStarting(true);
+    try {
+      await fetch("/api/start", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ roomName, dilemma }),
+      });
+    } catch {
+      setStarting(false);
+    }
+  }
+
+  return (
+    <div className="flex flex-col items-center gap-8 px-4 py-16">
+      {dilemma && (
+        <p className="max-w-xl text-center text-lg font-medium text-white/80">
+          &ldquo;{dilemma}&rdquo;
+        </p>
+      )}
+
+      <div className="w-full max-w-sm rounded-xl border border-white/10 bg-white/5 p-6">
+        <div className="mb-4 flex items-center gap-2 text-sm font-semibold uppercase tracking-widest text-white/40">
+          <Users size={14} />
+          Participants ({humans.length})
+        </div>
+        <ul className="flex flex-col gap-2">
+          {humans.map((p) => {
+            const isLocal = p.identity === room.localParticipant.identity;
+            const label = p.identity.startsWith("host-")
+              ? `Host${isLocal ? " (You)" : ""}`
+              : isLocal
+                ? `${p.identity} (You)`
+                : p.identity;
+            return (
+              <li key={p.identity} className="flex items-center gap-2 text-sm text-white/70">
+                <span className="h-2 w-2 rounded-full bg-emerald-400" />
+                {label}
+              </li>
+            );
+          })}
+        </ul>
+      </div>
+
+      {isHost ? (
+        <button
+          type="button"
+          onClick={startDebate}
+          disabled={starting}
+          className="flex items-center gap-2 rounded-md bg-amber-400 px-8 py-4 text-lg font-semibold text-black transition hover:bg-amber-300 disabled:opacity-50"
+        >
+          {starting ? "Starting…" : "Start Debate"}
+          <ArrowRight size={20} />
+        </button>
+      ) : (
+        <p className="animate-pulse text-sm text-white/40">Waiting for host to start the debate…</p>
+      )}
+
+      <RoomAudioRenderer />
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// RoomInner — handles metadata, routes between waiting / live views
+// ---------------------------------------------------------------------------
+
+function RoomInner({
+  roomName,
+  dilemma,
+  setDilemma,
+  onLeave,
+}: {
+  roomName: string;
+  dilemma: string;
+  setDilemma: (d: string) => void;
+  onLeave: () => void;
+}) {
+  const room = useRoomContext();
+  const [started, setStarted] = useState(false);
+
+  useEffect(() => {
+    function parseMeta() {
+      try {
+        const m = JSON.parse(room.metadata || "{}");
+        if (m.dilemma) setDilemma(m.dilemma);
+        if (m.status === "started") setStarted(true);
+      } catch {
+        if (room.metadata) setDilemma(room.metadata);
+      }
+    }
+    parseMeta();
+    room.on("roomMetadataChanged", parseMeta);
+    return () => void room.off("roomMetadataChanged", parseMeta);
+  }, [room, setDilemma]);
+
+  if (!started) return <WaitingRoom roomName={roomName} dilemma={dilemma} />;
+  return <RoomContent dilemma={dilemma} onLeave={onLeave} />;
+}
+
+// ---------------------------------------------------------------------------
 // Page
 // ---------------------------------------------------------------------------
 
@@ -381,7 +489,8 @@ export default function RoomPage() {
         video={false}
         onDisconnected={() => router.push("/")}
       >
-        <RoomContent
+        <RoomInner
+          roomName={roomName}
           dilemma={dilemma}
           setDilemma={setDilemma}
           onLeave={() => router.push("/")}

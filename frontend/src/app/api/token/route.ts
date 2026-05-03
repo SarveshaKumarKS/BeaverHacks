@@ -24,7 +24,10 @@ export async function POST(request: Request) {
   if (dilemma) {
     const roomSvc = new RoomServiceClient(LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET);
     try {
-      await roomSvc.createRoom({ name: roomName, metadata: dilemma });
+      await roomSvc.createRoom({
+        name: roomName,
+        metadata: JSON.stringify({ dilemma, status: "waiting" }),
+      });
     } catch {
       // Room may already exist — that's fine, continue.
     }

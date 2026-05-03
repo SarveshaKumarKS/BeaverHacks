@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime
+import json
 import logging
 import os
 
@@ -91,15 +92,33 @@ def _make_agent_token(room_name: str, identity: str) -> str:
 # Entry point
 # ---------------------------------------------------------------------------
 
+def _parse_meta(raw: str) -> dict:
+    try:
+        return json.loads(raw or "{}")
+    except (json.JSONDecodeError, TypeError):
+        return {"dilemma": raw or "Help us make an important decision.", "status": "started"}
+
+
 async def entrypoint(ctx: JobContext) -> None:
     await ctx.connect(auto_subscribe=AutoSubscribe.AUDIO_ONLY)
     logger.info("Room connected: %s", ctx.room.name)
 
-    participant = await ctx.wait_for_participant()
-    logger.info("Human participant: %s", participant.identity)
-
-    dilemma = ctx.room.metadata or "Help us make an important decision."
     livekit_url = os.getenv("LIVEKIT_URL", "ws://localhost:7880")
+
+    # Wait until the host clicks "Start Debate" (metadata status → "started")
+    logger.info("Waiting for host to start the debate…")
+    while True:
+        meta = _parse_meta(ctx.room.metadata)
+        if meta.get("status") == "started":
+            break
+        await asyncio.sleep(0.5)
+
+    dilemma = meta.get("dilemma", "Help us make an important decision.")
+    logger.info("Start signal received. Dilemma: %s", dilemma)
+
+    # All participants who joined during the waiting phase are already present
+    participant = await ctx.wait_for_participant()
+    logger.info("Participants ready, launching sessions")
 
     # ── Optimizer session — own room connection with known identity ───────────
     optimizer_room = rtc.Room()
