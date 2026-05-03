@@ -142,6 +142,25 @@ _vibe_ref:          list       = [None]
 _optimizer_state_g: list[str]  = ["idle"] # mirrored from entrypoint for _safe_reply
 _vibe_state_g:      list[str]  = ["idle"] # mirrored from entrypoint for _safe_reply
 
+# Orchestrator queue — orchestrator pushes here; agents consume at turn boundaries
+_orchestrator_queue: list[str] = []  # FIFO, max 3 items
+MAX_QUEUE_SIZE = 3
+
+def _enqueue(text: str, high_priority: bool = False) -> None:
+    """Push an orchestrator message into the queue.
+
+    High-priority items (search results) jump to the front.
+    Low-priority items are dropped when the queue is full.
+    """
+    if high_priority:
+        _orchestrator_queue.insert(0, text)
+        # Keep max size — drop oldest low-priority item from the tail if needed
+        while len(_orchestrator_queue) > MAX_QUEUE_SIZE:
+            _orchestrator_queue.pop()
+    elif len(_orchestrator_queue) < MAX_QUEUE_SIZE:
+        _orchestrator_queue.append(text)
+    # If full and low-priority, drop silently
+
 QUESTION_COOLDOWN = 25.0  # seconds before another direct question is allowed
 BUSY_STATES = {"speaking", "thinking"}  # states where generate_reply will time out
 
@@ -342,43 +361,37 @@ async def orchestrator_loop(
         action = decision.get("action", "continue")
         logger.info("Orchestrator → %s", decision)
 
-        # Route to whoever didn't speak last so alternation is respected
-        first_session  = vibe_session      if _last_spoke[0] == "optimizer" else optimizer_session
-        second_session = optimizer_session if _last_spoke[0] == "optimizer" else vibe_session
-
         if action == "inject_search" and not search_injected:
-            search_injected = True  # mark done immediately — prevents infinite loop when search_results is empty
+            search_injected = True  # mark done immediately — never loop on this
             if search_results:
-                # Only inject REAL Tavily results — never the orchestrator's hallucinated summary
                 raw_text = "; ".join(
                     f"{r.get('title', '')}: {r.get('content', '')[:150]}"
                     for r in search_results[:4]
                     if r.get("title")
                 )
                 if raw_text:
-                    _safe_reply(
-                        first_session,
-                        f"state at least two specific names, facts, or details from this out loud right now (no paraphrasing), "
-                        f"then react to what it means for the debate — don't ask a question: {raw_text}",
+                    _enqueue(
+                        f"here are real search results for the debate — name at least two specific places or facts "
+                        f"out loud right now, then react to what they mean: {raw_text}",
+                        high_priority=True,
                     )
+                    logger.info("Queued search results for next turn boundary")
 
         elif action == "ask_user":
             now = time.monotonic()
             if now - _last_question_t[0] < QUESTION_COOLDOWN:
-                logger.debug("Suppressing ask_user — nudging other agent to keep debate alive")
-                _safe_reply(first_session, "make your strongest point right now — keep the debate going")
+                _enqueue("make your sharpest point right now — keep the debate going")
             else:
                 question = decision.get("question", "ask the users what they actually think")
-                _safe_reply(first_session, f"stop debating for a second — ask the humans this exact question: \"{question}\"")
+                _enqueue(f"stop debating — ask the humans: \"{question}\"")
                 _last_question_t[0] = now
 
         elif action == "push_consensus":
             angle = decision.get("angle", "start driving toward a final answer")
-            _safe_reply(first_session, f"ok wrap it up — {angle}")
-            await asyncio.sleep(4)
-            _safe_reply(second_session, f"add your take — {angle}")
+            _enqueue(f"wrap it up — {angle}")
 
         elif action == "end_debate":
+            # End-of-debate is urgent — bypass queue and force directly
             verdict = decision.get("verdict", "the debate has concluded")
             _safe_reply(optimizer_session, f"final verdict time — {verdict}", force=True)
             await asyncio.sleep(2)
@@ -433,6 +446,7 @@ async def entrypoint(ctx: JobContext) -> None:
     _last_question_t[0]   = 0.0
     _optimizer_state_g[0] = "idle"
     _vibe_state_g[0]      = "idle"
+    _orchestrator_queue.clear()
 
     # ── Optimizer session ────────────────────────────────────────────────────
     optimizer_room  = rtc.Room()
@@ -507,16 +521,19 @@ async def entrypoint(ctx: JobContext) -> None:
             _last_spoke[0] = "optimizer"
             transcript_buffer.append(f"Optimizer: {text}")
             now = time.monotonic()
-            if (
-                not debate_ended[0]
-                and vibe_state[0] != "speaking"
-                and len(text) > 15
-                and (now - last_opt_bridge[0]) > BRIDGE_COOLDOWN
-                and text[:50] != last_vibe_text[0][:50]  # echo prevention
-            ):
-                _safe_reply(vibe_session, f"[Optimizer just said]: {text}")
-                last_opt_bridge[0] = now
-                last_opt_text[0] = text
+            if not debate_ended[0] and vibe_state[0] != "speaking":
+                if _orchestrator_queue:
+                    # Deliver queued orchestrator message at this natural turn boundary
+                    _safe_reply(vibe_session, _orchestrator_queue.pop(0))
+                    last_opt_bridge[0] = now
+                elif (
+                    len(text) > 15
+                    and (now - last_opt_bridge[0]) > BRIDGE_COOLDOWN
+                    and text[:50] != last_vibe_text[0][:50]
+                ):
+                    _safe_reply(vibe_session, f"[Optimizer just said]: {text}")
+                    last_opt_bridge[0] = now
+                    last_opt_text[0] = text
         elif ev.item.role == "user":
             # Debounce: skip near-duplicate user utterances within 3 seconds
             now = time.monotonic()
@@ -551,16 +568,19 @@ async def entrypoint(ctx: JobContext) -> None:
             transcript_buffer.append(f"Vibe-Check: {text}")
             last_vibe_turn[0] = turn_count[0]
             now = time.monotonic()
-            if (
-                not debate_ended[0]
-                and optimizer_state[0] != "speaking"
-                and len(text) > 15
-                and (now - last_vibe_bridge[0]) > BRIDGE_COOLDOWN
-                and text[:50] != last_opt_text[0][:50]  # echo prevention
-            ):
-                _safe_reply(optimizer_session, f"[Vibe-Check just said]: {text}")
-                last_vibe_bridge[0] = now
-                last_vibe_text[0] = text
+            if not debate_ended[0] and optimizer_state[0] != "speaking":
+                if _orchestrator_queue:
+                    # Deliver queued orchestrator message at this natural turn boundary
+                    _safe_reply(optimizer_session, _orchestrator_queue.pop(0))
+                    last_vibe_bridge[0] = now
+                elif (
+                    len(text) > 15
+                    and (now - last_vibe_bridge[0]) > BRIDGE_COOLDOWN
+                    and text[:50] != last_opt_text[0][:50]
+                ):
+                    _safe_reply(optimizer_session, f"[Vibe-Check just said]: {text}")
+                    last_vibe_bridge[0] = now
+                    last_vibe_text[0] = text
 
     # ── Data Channel: speaker changes + consensus signal ─────────────────────
     @ctx.room.on("data_received")
@@ -660,7 +680,7 @@ async def entrypoint(ctx: JobContext) -> None:
         nonlocal search_results
         search_results = await _run_web_search(dilemma, location_ctx or "")
 
-        # Auto-inject search results as soon as they arrive — route to whoever didn't speak last
+        # Queue search results for delivery at the next natural turn boundary
         if search_results and not debate_ended[0]:
             raw_text = "; ".join(
                 f"{r.get('title', '')}: {r.get('content', '')[:150]}"
@@ -668,13 +688,12 @@ async def entrypoint(ctx: JobContext) -> None:
                 if r.get("title")
             )
             if raw_text:
-                target = vibe_session if _last_spoke[0] == "optimizer" else optimizer_session
-                _safe_reply(
-                    target,
+                _enqueue(
                     f"here are specific results from a web search — "
                     f"state at least two specific names or facts from this out loud right now (no paraphrasing): {raw_text}",
+                    high_priority=True,
                 )
-                logger.info("Auto-injected search results into debate")
+                logger.info("Queued search results for next turn boundary (auto-inject)")
 
         await orchestrator_loop(
             dilemma=dilemma,
